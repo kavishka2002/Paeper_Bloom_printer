@@ -1,0 +1,315 @@
+import {isPdfPrinter,isVirtualPrinter} from '../../packages/printing/capabilities';
+import {calculateBulk,documentPricing} from '../../packages/printing/calculation';
+import {validatePrinter} from '../../packages/printing/capabilities';
+import {effectivePhotoPricing,findPhotoPricing,quotePhotos,photoSizeKey} from '../../packages/printing/photo-pricing';
+import type {PricingRule} from '../../packages/shared/contracts';
+import {colomboDay,DetailDrawer} from './design';
+import type {PrinterCapabilities} from '../../packages/printing/windows';
+import {useEffect,useState} from 'react';
+import {useData,Button,Panel,PrinterSelect,money,stamp,name} from './context';
+import {useWorkspace} from './state';
+import {DocumentPreview,DocumentThumbnail,ImposedPreview,inspectDocument} from './pdf';
+import {cellBox,constrainPhotoFrame,contentBox,photoPlacementGeometry,planPhotos,reorderPhotoFrames,tightPhotoFrame,type DocumentInfo} from '../../packages/printing/plan';
+import {effectiveDpi} from '../../packages/printing/image-processing';
+import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
+const sizes:Record<string,[number,number]>={'Passport (35 × 45 mm)':[35,45],'ID (25 × 35 mm)':[25,35],'1 × 1 inch':[25.4,25.4],'2 × 2 inch':[50.8,50.8],'3 × 4 inch':[76.2,101.6],'4 × 6 inch':[101.6,152.4],'5 × 7 inch':[127,177.8],'6 × 8 inch':[152.4,203.2],'8 × 10 inch':[203.2,254],A6:[105,148],A5:[148,210],A4:[210,297],A3:[297,420]};
+type Item=NonNullable<PrintSettingsInput['photoItems']>[string]&{rotation:number;fit:'contain'|'cover'};
+type Positions=NonNullable<PrintSettingsInput['photoPositions']>;
+type PhotoInk=NonNullable<Item['ink']>;
+const inks:[PhotoInk,string][]=[['inherit','Use job ink'],['original','Original colour'],['colour','Full colour'],['mono','Black & white'],['grayscale','Grayscale'],['sepia','Sepia'],['auto','Auto-detect colour']];
+const grids:[string,number,number][]=[['Full page',1,1],['Half page',2,1],['One-third page',3,1],['Quarter page',2,2],['One-sixth page',3,2],['One-eighth page',4,2],['9-up',3,3],['12-up',4,3],['16-up',4,4]];
+export function PhotoStudio(){
+ const {data,run,refresh,error}=useData(),state=useWorkspace(),active=data.jobs.find(j=>j.id===state.job);
+ const [arrangement,setArrangement]=useState<'auto'|'grid'|'rows'|'columns'|'manual'>('auto'),[positions,setPositions]=useState<NonNullable<PrintSettingsInput['photoPositions']>>([]);
+ const [ink,setInk]=useState<PhotoInk>('inherit'),[original,setOriginal]=useState('');
+ const [qualityThreshold,setQualityThreshold]=useState(150),[acceptedQuality,setAcceptedQuality]=useState('');
+ const [charge,setCharge]=useState(0),[discount,setDiscount]=useState(0),[pdfPrinter,setPdfPrinter]=useState('');
+ const [lockAspect,setLockAspect]=useState(true);
+ const [snap,setSnap]=useState(0),[past,setPast]=useState<Positions[]>([]),[future,setFuture]=useState<Positions[]>([]);
+ const [editorOpen,setEditorOpen]=useState(false),[editorGap,setEditorGap]=useState<number>();
+ const [grid,setGrid]=useState(false),[rows,setRows]=useState(2),[columns,setColumns]=useState(2);
+ const [duplex,setDuplex]=useState<PrintSettingsInput['duplex']>('simplex'),[order,setOrder]=useState<NonNullable<PrintSettingsInput['order']>>('horizontal');
+ const [paperRate,setPaperRate]=useState(0),[finishing,setFinishing]=useState(0);
+ const [monoRate,setMonoRate]=useState((data.settings?.photo??0)/100);
+ const twoSided=duplex!=='simplex';
+ const [media,setMedia]=useState('Default');
+ const [pricingRules,setPricingRules]=useState<PricingRule[]>([]),[billing,setBilling]=useState<'sheet'|'side'|'photo'>('sheet'),[rate,setRate]=useState((data.settings?.photo??0)/100),[setupFee,setSetupFee]=useState(0),[sizeRates,setSizeRates]=useState<Record<string,number>>({});
+ useEffect(()=>{void window.bloom.call('pricingRules',null).then(setPricingRules).catch(error)},[]);
+ const [paperWidth,setPaperWidth]=useState(210),[paperHeight,setPaperHeight]=useState(297),[dpi,setDpi]=useState(150),[smoothing,setSmoothing]=useState(true);
+ const [search,setSearch]=useState(''),[recent,setRecent]=useState(false),[maxPerSheet,setMaxPerSheet]=useState(0),[whiteBorder,setWhiteBorder]=useState(0),[customWidth,setCustomWidth]=useState(35),[customHeight,setCustomHeight]=useState(45),[unit,setUnit]=useState<'mm'|'cm'|'in'>('mm');
+ const [adding,setAdding]=useState(false),[editReason,setEditReason]=useState('');
+ const [pdfCopies,setPdfCopies]=useState(1),[pdfNup,setPdfNup]=useState(1),[pdfDuplex,setPdfDuplex]=useState<'simplex'|'longEdge'|'shortEdge'>('simplex'),[pdfColour,setPdfColour]=useState(false);
+ const [extraPdfs,setExtraPdfs]=useState<string[]>([]),[pdfPages,setPdfPages]=useState<Record<string,number>>({}),[pdfPreview,setPdfPreview]=useState('');
+ const [customer,setCustomer]=useState(active?(active.customer_id??'walk-in'):state.customer),[selected,setSelected]=useState<string[]>([]),[items,setItems]=useState<Record<string,Item>>({});
+ const [paper,setPaper]=useState<'A4'|'A3'|'A5'|'A6'|'Letter'|'Legal'|'Custom'>('A4'),[printer,setPrinter]=useState(data.settings?.printer??''),[landscape,setLandscape]=useState(false),[size,setSize]=useState('4 × 6 inch'),[quantity,setQuantity]=useState(1),[margin,setMargin]=useState(5),[gap,setGap]=useState(2),[guides,setGuides]=useState(true),[fit,setFit]=useState<'contain'|'cover'>('contain'),[colour,setColour]=useState(true),[date,setDate]=useState(''),[unprinted,setUnprinted]=useState(false),[busy,setBusy]=useState(false),[infos,setInfos]=useState<DocumentInfo[]>([]),[failure,setFailure]=useState('');
+ useEffect(()=>{const {policy:saved}=effectivePhotoPricing(findPhotoPricing(pricingRules,{paper,photoMedia:media,duplex})?.policy,data.settings!,duplex);setPaperRate((saved?.paperPerSheet??0)/100);setFinishing((saved?.finishing??0)/100);setMonoRate((saved?.mono??data.settings?.photo??0)/100);setBilling(saved.basis==='photo'||saved.basis==='side'?saved.basis:'sheet');setRate((saved?.colour??data.settings?.photo??0)/100);setSetupFee((saved?.setup??0)/100);setSizeRates(Object.fromEntries(Object.entries(saved?.photoSizes??{}).map(([key,v])=>[key,v/100])))},[paper,media,twoSided,pricingRules]);
+ useEffect(()=>{let saved=active?.printSettings;const previous=data.queue.find(q=>q.job_id===active?.id&&q.settings&&['Submitted','Completed','Unconfirmed'].includes(q.status));if(!saved&&previous?.settings){try{const prior=normalizedSettings(JSON.parse(previous.settings));if(Object.keys(prior.photoItems).length)saved=prior}catch{}}setEditorOpen(false);setOriginal('');setPast([]);setFuture([]);setAcceptedQuality('');setInk('inherit');setCharge((saved?.photoAdjustments?.charge??0)/100);setDiscount((saved?.photoAdjustments?.discount??0)/100);setPdfPrinter(saved?.pdfSettings?.printer??'');setGrid(!!saved?.photoGrid);setRows(saved?.photoGrid?.rows??2);setColumns(saved?.photoGrid?.columns??2);setDuplex(saved?.duplex??'simplex');setOrder(saved?.order??'horizontal');setFit(saved?.fit??'contain');setSelected(active?[...new Set([...(saved?.fileSelection??[]),...active.files])].filter(id=>data.attachments.find(a=>a.id===id)?.mime.startsWith('image/')&&(!Object.keys(saved?.photoItems??{}).length||!!saved?.photoItems?.[id])):[]);setItems(Object.fromEntries(Object.entries(saved?.photoItems??{}).map(([id,v])=>[id,{...v,rotation:v.rotation??0,fit:v.fit??'contain'}])));setCustomer(active?(active.customer_id??'walk-in'):state.customer);setExtraPdfs(active&&!saved?.photoBatch?active.files.filter(id=>data.attachments.find(a=>a.id===id)?.mime==='application/pdf'):[]);if(saved){setPaper(['A4','A3','A5','A6','Letter','Legal','Custom'].includes(saved.paper)?saved.paper as typeof paper:'A4');setPrinter(saved.printer);setLandscape(saved.landscape);setMargin(saved.marginMm??5);setGap(saved.gapMm??2);setGuides(saved.photo?.cutGuides??false);setColour(saved.colour);setWhiteBorder(saved.photo?.whiteBorderMm??0);setMaxPerSheet(saved.photoMaxPerSheet??0);setPaperWidth(saved.customPaper?.widthMm??210);setPaperHeight(saved.customPaper?.heightMm??297);setDpi(saved.renderDpi??150);setSmoothing(saved.smoothing??true);setMedia(saved.photoMedia??'Default');setPdfCopies(saved.pdfSettings?.copies??1);setPdfNup(saved.pdfSettings?.nup??1);setPdfDuplex(saved.pdfSettings?.duplex??'simplex');setPdfColour(saved.pdfSettings?.colour??saved.colour);setArrangement(saved.photoArrangement??'auto');setPositions(saved.photoPositions??[])}},[active?.id]);
+ const customerLibrary=data.attachments.filter(a=>a.status==='Ready'&&a.mime.startsWith('image/')&&(!customer||a.customer_id===(customer==='walk-in'?null:customer))&&a.name.toLowerCase().includes(search.toLowerCase())&&(!recent||Date.parse(a.created)>Date.now()-86400000)&&(!date||colomboDay(a.created)===date)&&(!unprinted||!data.jobs.some(j=>j.files.includes(a.id)&&j.status==='Completed')));
+ const library=active&&!adding?customerLibrary.filter(file=>active.files.includes(file.id)):customerLibrary;
+ const [capabilities,setCapabilities]=useState<PrinterCapabilities>();
+ const [capabilityError,setCapabilityError]=useState('');
+ useEffect(()=>{let current=true;setCapabilities(undefined);setCapabilityError('');if(printer&&(paper!=='Custom'||paperWidth>=20&&paperHeight>=20&&paperWidth<=2000&&paperHeight<=2000))void window.bloom.call('printerCapabilities',{printer,settings:normalizedSettings({printer,paper,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,copies:1,colour,landscape,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'})}).then(c=>{if(current)setCapabilities(c)}).catch(e=>{if(current)setCapabilityError(e instanceof Error?e.message:String(e))});return()=>{current=false}},[printer,paper,landscape,paperWidth,paperHeight]);
+ const pdfKey=extraPdfs.join('|');useEffect(()=>{let current=true;setPdfPages({});void (async()=>{const result:Record<string,number>={};for(const id of extraPdfs)result[id]=(await inspectDocument(id)).pages.length;if(current)setPdfPages(result)})().catch(error);return()=>{current=false}},[pdfKey]);
+ const key=selected.join('|');
+ useEffect(()=>{let current=true;setInfos([]);setFailure('');void (async()=>{const values=[];for(const id of selected)values.push(await inspectDocument(id));if(current)setInfos(values)})().catch(e=>{if(current)setFailure(e.message)});return()=>{current=false}},[key]);
+ const defaultItem=():Item=>({widthMm:size==='Custom'?customWidth*(unit==='in'?25.4:unit==='cm'?10:1):sizes[size][0],heightMm:size==='Custom'?customHeight*(unit==='in'?25.4:unit==='cm'?10:1):sizes[size][1],quantity,rotation:0,fit,ink});
+ const photoItems=Object.fromEntries(selected.map(id=>{
+  const item=items[id]??defaultItem(),source=infos.find(info=>info.id===id)?.pages[0];
+  return [id,item.ink==='auto'?{...item,detectedColour:source?source.ink==='colour'||source.ink==='uncertain':item.detectedColour}:item];
+ }));
+ const adjustments={charge:Math.round(charge*100),discount:Math.round(discount*100)};
+ const options:PrintSettingsInput={fileSelection:[...selected,...extraPdfs],pdfSettings:{copies:pdfCopies,nup:pdfNup,duplex:pdfDuplex,colour:pdfColour,printer:pdfPrinter||undefined},photoAdjustments:adjustments,photoMedia:media,photoArrangement:grid?'auto':arrangement,photoGrid:grid?{rows,columns}:undefined,order,photoPositions:!grid&&arrangement==='manual'?positions:undefined,renderDpi:dpi,smoothing,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,photoMaxPerSheet:maxPerSheet||undefined,printable:capabilities?.printable,photoBatch:extraPdfs.length===0,printer,paper,copies:1,colour,landscape,duplex,range:'',rotation:0,fit,layout:'single',marginMm:margin,gapMm:gap,autoRotate:true,photoItems,photo:{widthMm:35,heightMm:45,quantity:1,cutGuides:guides,whiteBorderMm:whiteBorder}};
+ let plan:ReturnType<typeof planPhotos>|undefined,problem=failure;try{if(infos.length&&infos.length===selected.length)plan=planPhotos(options,infos)}catch(e){problem=e instanceof Error?e.message:String(e)}
+ const {policy,source:priceSource}=effectivePhotoPricing(findPhotoPricing(pricingRules,options)?.policy,data.settings!,duplex);let photoQuote:ReturnType<typeof quotePhotos>|undefined;try{if(plan)photoQuote=quotePhotos(plan,policy)}catch(e){problem=e instanceof Error?e.message:String(e)}
+ const exportPrinter=isPdfPrinter(printer,capabilities?.driver);
+ const virtualPrinter=isVirtualPrinter(printer)||isVirtualPrinter(capabilities?.driver??'');
+ let printerProblem=exportPrinter?'':!printer?'Select a Windows printer.':twoSided&&virtualPrinter
+  ?'Choose a physical printer for two-sided printing, or select Microsoft Print to PDF.':capabilityError;
+ if(capabilities&&!printerProblem&&!exportPrinter){
+  try{validatePrinter(normalizedSettings(options),capabilities)}catch(e){printerProblem=e instanceof Error?e.message:String(e)}
+ }
+ if(!exportPrinter&&printer&&!capabilities&&!printerProblem)printerProblem='Reading Windows printer capabilities...';
+ const pdfReady=extraPdfs.every(id=>pdfPages[id]!==undefined);
+ const pdfPolicy=pricingRules.find(rule=>rule.method===(pdfNup>1?'nup':'ordinary')&&rule.paper===paper&&rule.duplex===(pdfDuplex!=='simplex')&&(!rule.media||rule.media==='Default'))?.policy??documentPricing(data.settings!,pdfDuplex);
+ let pdfCalculation:ReturnType<typeof calculateBulk>|undefined;
+ try{if(extraPdfs.length&&pdfReady)pdfCalculation=calculateBulk(extraPdfs.map(id=>({id,customer:active?.customer_id??(customer==='walk-in'?null:customer),settings:{documentPages:pdfPages[id],copies:pdfCopies,pagesPerSide:pdfNup,duplex:pdfDuplex,paper,customPaper:options.customPaper,mode:pdfColour?'colour':'mono',pricing:pdfPolicy}})))}catch(e){problem=e instanceof Error?e.message:String(e)}
+ const priceSizes=[...new Set((grid||arrangement==='manual'&&positions.some(position=>position.frame))
+  ?plan?.sides.flatMap(side=>side.placements.map(p=>photoSizeKey(p.cutBox!.width,p.cutBox!.height)))??[]
+  :Object.values(photoItems).map(item=>photoSizeKey(item.widthMm,item.heightMm)))];
+ const sheets=photoQuote?.physicalSheets??0,photoTotal=photoQuote?.total??0,pdfTotal=pdfCalculation?.finalTotal??0;
+ const subtotal=photoTotal+pdfTotal,total=subtotal+adjustments.charge-adjustments.discount;
+ if(!Number.isSafeInteger(total)||total<0||adjustments.charge<0||adjustments.discount<0)problem='Check the additional charge and discount.';
+ const resolutions=new Map<string,number>();
+ if(plan)for(const side of plan.sides)for(const placement of side.placements){
+  const source=infos.find(info=>info.id===placement.file)?.pages[0];
+  if(!source||!placement.file)continue;
+  const geometry=photoPlacementGeometry(source,placement,plan.settings),crop=placement.edit?.crop;
+  const x=source.widthMm*96/25.4*(crop?.width??1),y=source.heightMm*96/25.4*(crop?.height??1);
+  const dpi=effectiveDpi(geometry.rotation%180?y:x,geometry.rotation%180?x:y,geometry.box.width,geometry.box.height);
+  resolutions.set(placement.file,Math.min(resolutions.get(placement.file)??dpi,dpi));
+ }
+ const lowQuality=[...resolutions].filter(([,dpi])=>dpi<qualityThreshold);
+ const qualityKey=JSON.stringify([qualityThreshold,lowQuality]);
+ const qualityBlocked=lowQuality.length>0&&acceptedQuality!==qualityKey;
+ const qualityLabel=(dpi:number)=>dpi<qualityThreshold*2/3?'Very low':dpi<qualityThreshold?'Low':dpi>=Math.max(250,qualityThreshold*1.5)?'High':'Acceptable';
+ const photoOutput={...options,fileSelection:selected,photoBatch:true};
+ const pdfOutput={...options,printer:pdfPrinter||printer,fileSelection:extraPdfs,photoItems:{},photoGrid:undefined,photoBatch:false,copies:pdfCopies,nup:pdfNup,duplex:pdfDuplex,colour:pdfColour};
+ function choose(ids:string[]){
+  if(!ids.length){setSelected([]);return}
+  const owner=data.attachments.find(a=>a.id===ids[0])?.customer_id;
+  if(owner===undefined||active&&owner!==active.customer_id||ids.some(id=>data.attachments.find(a=>a.id===id)?.customer_id!==owner)){error(new Error('Select photographs from one customer.'));return}
+  if(new Set([...ids,...extraPdfs,...(active?.files??[])]).size>40){error(new Error('Each order can contain up to 40 files. Use a separate order for the remaining photos.'));return}
+  if(!grid&&arrangement==='manual'){
+   const remaining=positions.filter(position=>ids.includes(position.file));
+   const sides=[...new Set(remaining.map(position=>position.sheet))].sort((a,b)=>a-b);
+   const kept=remaining.map(position=>({...position,sheet:sides.indexOf(position.sheet)}));
+   const added=ids.filter(id=>!selected.includes(id));
+   if(added.length&&kept.length&&kept.every(position=>position.frame)){
+    try{
+     const metadata=added.map(id=>({id,mime:'image/png',pages:[{widthMm:1,heightMm:1,blank:false,ink:'colour' as const,coverage:1}]}));
+     const items=Object.fromEntries(added.map(id=>[id,photoItems[id]??defaultItem()]));
+     const extra=planPhotos({...options,photoItems:items,photoArrangement:'auto',photoPositions:undefined},metadata);
+     const more=extra.sides.flatMap((side,index)=>side.placements.map(p=>({
+      file:p.file!,copy:p.copy!,sheet:sides.length+index,x:p.cutBox!.x,y:p.cutBox!.y,
+      frame:{width:p.cutBox!.width,height:p.cutBox!.height,rotation:p.rotation}
+     })));
+     setPositions([...kept,...more]);
+    }catch(e){error(e);return}
+   }else if(added.length){setArrangement('auto');setPositions([])}
+   else setPositions(kept);
+   setPast([]);setFuture([]);
+  }
+  setSelected(ids);setCustomer(owner??'walk-in');
+ }
+ function reorderPhotos(next:string[]){
+  if(!grid&&arrangement==='manual'){
+   const assignments=next.flatMap(file=>Array.from({length:photoItems[file].quantity},(_,copy)=>({file,copy})));
+   try{setPositions(reorderPhotoFrames(positions,assignments))}catch(e){error(e);return}setPast([]);setFuture([]);
+  }
+  setSelected(next);
+ }
+ function movePhoto(from:number,to:number){
+  if(from===to||to<0||to>=selected.length)return;
+  const next=[...selected];const [file]=next.splice(from,1);next.splice(to,0,file);reorderPhotos(next);
+ }
+ function selectAll(){
+  if(!customer&&!active)return;
+  choose([...new Set([...selected,...customerLibrary.map(file=>file.id)])]);
+  if(active)setAdding(true);
+ }
+ function fitOnA4(){
+  const count=Math.min(64,Object.values(photoItems).reduce((sum,item)=>sum+item.quantity,0));
+  if(!count)return;
+  const ratio=landscape?297/210:210/297;
+  let best={rows:8,columns:8,score:Infinity};
+  for(let r=1;r<=8;r++)for(let c=1;c<=8;c++){
+   if(r*c<count)continue;
+   const score=(r*c-count)*.25+Math.abs(Math.log((c/r)/ratio));
+   if(score<best.score)best={rows:r,columns:c,score};
+  }
+  setPaper('A4');setGrid(true);setRows(best.rows);setColumns(best.columns);setDuplex('simplex');setGuides(false);
+ }
+ function editOnSheet(){
+  if(!plan)return;
+  const next=plan.sides.flatMap((side,sheet)=>side.placements.map(p=>{
+   const source=infos.find(info=>info.id===p.file)?.pages[0];
+   const frame=source?tightPhotoFrame(source,p,plan.settings):{...p.cutBox!,rotation:p.rotation};
+   return {file:p.file!,copy:p.copy!,sheet,x:frame.x,y:frame.y,
+    frame:{width:frame.width,height:frame.height,rotation:frame.rotation}};
+  }));
+  if(!grid&&arrangement==='manual'){movePositions(next,true);return}
+  setGrid(false);setArrangement('manual');setPositions(next);setPast([]);setFuture([]);
+ }
+ function fillSheets(){
+  if(!plan)return;
+  const spacing=Math.min(gap,Math.max(0,editorGap??gap));
+  try{
+   const next=plan.sides.flatMap((side,sheet)=>{
+    const photos=[...side.placements].sort((a,b)=>a.cutBox!.y-b.cutBox!.y||a.cutBox!.x-b.cutBox!.x);
+    if(!photos.length)return [];
+    const area=contentBox({...plan.settings,scaling:plan.settings.printable?'printable':plan.settings.scaling},side.width,side.height);
+    const border=whiteBorder;
+    let best:Positions|undefined,bestArea=-1;
+    for(let rows=1;rows<=8;rows++){
+     const columns=Math.ceil(photos.length/rows);
+     if(columns>8||area.width-spacing*(columns-1)<=columns*border*2||area.height-spacing*(rows-1)<=rows*border*2)continue;
+     let usedArea=0;
+     const frames=photos.map((photo,index)=>{
+      const cutBox=cellBox(index,columns,rows,area,spacing,'horizontal');
+      const box={x:cutBox.x+border,y:cutBox.y+border,width:cutBox.width-border*2,height:cutBox.height-border*2};
+      const source=infos.find(info=>info.id===photo.file)!.pages[0];
+      const frame=tightPhotoFrame(source,{...photo,box,cutBox},plan.settings);
+      usedArea+=frame.width*frame.height;
+      return {file:photo.file!,copy:photo.copy!,sheet,x:frame.x,y:frame.y,frame:{width:frame.width,height:frame.height,rotation:frame.rotation}};
+     });
+     if(usedArea>bestArea){best=frames;bestArea=usedArea}
+    }
+    if(!best)throw new Error('Reduce the spacing or white border to fit the photos on this sheet.');
+    return best;
+   });
+   planPhotos({...options,photoGrid:undefined,photoArrangement:'manual',photoPositions:next,gapMm:spacing},infos);
+   setGap(spacing);setEditorGap(undefined);movePositions(next);
+  }catch(e){error(e)}
+ }
+ function movePositions(next:Positions,validate=false){
+  try{if(validate)planPhotos({...options,photoPositions:next},infos)}catch(e){error(e);return}
+  setPast(history=>[...history.slice(-29),positions]);setFuture([]);setPositions(next);
+ }
+ function undoMove(){
+  const previous=past.at(-1);if(!previous)return;
+  setFuture(history=>[positions,...history]);setPast(past.slice(0,-1));setPositions(previous);
+ }
+ function redoMove(){
+  const next=future[0];if(!next)return;
+  setPast(history=>[...history,positions]);setFuture(future.slice(1));setPositions(next);
+ }
+ function alignPosition(index:number,alignment:'left'|'center'|'right'){
+  const position=positions[index],side=plan?.sides[position.sheet];
+  if(!plan||!side)return;
+  const placement=side.placements.find(item=>item.file===position.file&&item.copy===position.copy);
+  if(!placement?.cutBox)return;
+  const area=contentBox({...plan.settings,scaling:plan.settings.printable?'printable':plan.settings.scaling},side.width,side.height);
+  const x=area.x+(area.width-placement.cutBox.width)*(alignment==='left'?0:alignment==='center'?.5:1);
+  movePositions(positions.map((item,i)=>i===index?{...item,x}:item),true);
+ }
+ function duplicate(id:string){
+  const item=photoItems[id],quantity=item.quantity+1;
+  if(!grid&&arrangement==='manual'){
+   if(!plan)return;
+   const side=plan.sides[0],area=contentBox({...plan.settings,scaling:plan.settings.printable?'printable':plan.settings.scaling},side.width,side.height);
+   const frame=positions.find(position=>position.file===id)?.frame;
+   const next=[...positions,{file:id,copy:item.quantity,sheet:Math.max(-1,...positions.map(position=>position.sheet))+1,x:area.x,y:area.y,frame}];
+   try{planPhotos({...options,photoItems:{...photoItems,[id]:{...item,quantity}},photoPositions:next},infos)}catch(e){error(e);return}
+   setPositions(next);setPast([]);setFuture([]);
+  }
+  update(id,{quantity});
+ }
+ function removePhoto(id:string){
+  setSelected(current=>current.filter(file=>file!==id));
+  if(!grid&&arrangement==='manual'){
+   const remaining=positions.filter(position=>position.file!==id);
+   const sheets=[...new Set(remaining.map(position=>position.sheet))].sort((a,b)=>a-b);
+   setPositions(remaining.map(position=>({...position,sheet:sheets.indexOf(position.sheet)})));
+   setPast([]);setFuture([]);
+  }
+ }
+ function update(id:string,value:Partial<Item>){
+ if(value.rotation!==undefined&&!grid&&arrangement==='manual'){
+  const delta=value.rotation-(photoItems[id]?.rotation??0);
+  if(delta)setPositions(current=>current.map(position=>position.file===id&&position.frame?{...position,frame:{...position.frame,rotation:(position.frame.rotation+delta+360)%360}}:position));
+ }
+ setItems(prior=>({...prior,[id]:{...(prior[id]??defaultItem()),...value}}))}
+ async function create(){if(!plan||problem||busy||!selected.length)return;setBusy(true);try{const owner=data.attachments.find(a=>a.id===selected[0])!.customer_id;const id=await window.bloom.call('order',{customer:owner,files:[...selected,...extraPdfs],copies:1,paper,colour,price:subtotal,discount:adjustments.discount,charge:adjustments.charge,printSettings:normalizedSettings(options)});await refresh();state.set({job:id})}catch(e){error(e)}finally{setBusy(false)}}
+ const addedPhotos=!!active&&selected.some(id=>!active.files.includes(id));
+ const completeSelection=!active||active.files.every(id=>selected.includes(id)||extraPdfs.includes(id));
+ const exportBlocked=!plan||!!problem||!pdfReady||busy||(addedPhotos&&!completeSelection);
+ const printBlocked=exportBlocked||(!exportPrinter&&(!!printerProblem||qualityBlocked));
+ async function submitPhotos(operation:'print'|'savePrintPdf'){
+  if(!active||busy||(operation==='print'?printBlocked:exportBlocked))return;
+  setBusy(true);
+  try{
+   if(addedPhotos&&!await run('updatePhotoOrder',{id:active.id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total,reason:'Added the selected customer photos'},'Selected photos added to the order'))return;
+   if(operation==='print'&&!exportPrinter)await run('print',{id:active.id,...photoOutput},'Submitted to Windows; confirm completion in Print Queue.');
+   else await run('savePrintPdf',{id:active.id,...photoOutput},'Prepared photo PDF saved');
+  }catch(e){error(e)}finally{setBusy(false)}
+ }
+ const photoPreview=plan&&selected.length?(<ImposedPreview id={selected[0]} photoIds={selected} lockPhotoAspect={lockAspect} onPhotoMove={!grid&&arrangement==='manual'?(move)=>{
+ const side=plan.sides[move.sheet];
+ if(!side)return;
+ const area=contentBox({...plan.settings,scaling:plan.settings.printable?'printable':plan.settings.scaling},side.width,side.height);
+ const round=(value:number)=>snap?Math.round(value/snap)*snap:value;
+ const current=side.placements.find(p=>p.file===move.file&&p.copy===move.copy)?.cutBox;
+ if(!current)return;
+ const neighbors=side.placements.filter(p=>p.file!==move.file||p.copy!==move.copy).map(p=>p.cutBox!);
+ const target={x:move.resizing?move.x:round(move.x),y:move.resizing?move.y:round(move.y),width:move.width,height:move.height};
+ const frame=constrainPhotoFrame(current,target,area,neighbors,gap);
+ movePositions(positions.map(p=>p.file===move.file&&p.copy===move.copy?{...p,sheet:move.sheet,x:frame.x,y:frame.y,frame:{width:frame.width,height:frame.height,rotation:move.rotation}}:p),true)
+ }:undefined} input={{id:active?.id??'preview',...options}}/>):null;
+ const photoSubmitButtons=active?<>{addedPhotos&&!completeSelection&&<small>Select the other files already in this order before adding new photos.</small>}<Button disabled={printBlocked} onClick={()=>void submitPhotos('print')}>{exportPrinter?(addedPhotos?'Save order and print to PDF':'Print to PDF'):addedPhotos?'Save order and print photos':duplex.startsWith('manual')?'Print photo fronts':'Print selected photo sheets'}</Button>{!exportPrinter&&<Button className="secondary" disabled={exportBlocked} onClick={()=>void submitPhotos('savePrintPdf')}>{addedPhotos?'Save order and export PDF':'Save photo sheets PDF'}</Button>}</>:null;
+ return <div className="studio-workspace photo-studio-workspace" onDragOver={e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy'}}} onDrop={async e=>{if(!e.dataTransfer.files.length)return;e.preventDefault();if(!customer){error(new Error('Choose a customer or Walk-in before dropping photos.'));return}try{const imported=await window.bloom.importDropped(Array.from(e.dataTransfer.files),customer==='walk-in'?null:customer);if(active)setAdding(true);await refresh();if(!imported)error(new Error('No new supported files were imported. Existing duplicates were retained.'))}catch(e){error(e)}}}><Panel><h2>Customer photo library</h2>{active&&<Button className="secondary" onClick={()=>state.set({job:''})}>New photo order</Button>}{active&&<Button className="secondary" onClick={()=>setAdding(!adding)}>{adding?'Show order photos':'Add customer photos'}</Button>}<label>Customer<select disabled={!!active} value={customer} onChange={e=>{setCustomer(e.target.value);setSelected([]);setExtraPdfs([])}}><option value="">Choose customer</option><option value="walk-in">Walk-in (select files explicitly)</option>{data.customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>Search photos<input value={search} onChange={e=>setSearch(e.target.value)}/></label><label className="check"><input type="checkbox" checked={recent} onChange={e=>setRecent(e.target.checked)}/>Recent 24 hours</label><label>Received date<input type="date" value={date} onChange={e=>setDate(e.target.value)}/></label><label className="check"><input type="checkbox" checked={unprinted} onChange={e=>setUnprinted(e.target.checked)}/>Unprinted orders only</label><div className="actions"><Button disabled={!customer&&!active} onClick={selectAll}>Select All</Button><Button className="secondary" onClick={()=>choose([])}>Deselect</Button></div><Button className="secondary" disabled={!customer} onClick={async()=>{if(await run('import',{customer:customer==='walk-in'?null:customer},'Photos imported'))setAdding(true)}}>Import local files</Button><p>{selected.length} selected</p><div className="photo-library">{library.map(a=><label key={a.id} className="photo-library-card"><input type="checkbox" checked={selected.includes(a.id)} onChange={e=>choose(e.target.checked?[...selected,a.id]:selected.filter(id=>id!==a.id))}/><DocumentThumbnail id={a.id}/><span className="photo-library-caption">{a.name}<small>{stamp(a.created)}</small></span></label>)}</div></Panel>
+ <Panel><h2>Final photo sheets</h2><div className="actions"><Button className="secondary" disabled={!selected.length} onClick={fitOnA4}>Fit selected photos on A4</Button><Button className="secondary" disabled={!plan} onClick={()=>{if(grid||arrangement!=='manual'||positions.some(p=>!p.frame))editOnSheet();setEditorOpen(true);setOriginal('')}}>Edit directly on sheet</Button></div>
+ {!grid&&arrangement==='manual'&&<label className="check"><input type="checkbox" checked={lockAspect} onChange={e=>setLockAspect(e.target.checked)}/> Lock frame proportions while dragging</label>}
+ {selected.length>0&&<label>Compare original photo<select value={original} onChange={e=>setOriginal(e.target.value)}><option value="">Final sheet</option>{selected.map((id,index)=><option value={id} key={id}>Original {index+1} - {data.attachments.find(file=>file.id===id)?.name}</option>)}</select></label>}{extraPdfs.length>0&&<div className="actions"><Button className="secondary" onClick={()=>setPdfPreview('')}>Photo sheets</Button>{extraPdfs.map(id=><Button className="quiet" key={id} onClick={()=>setPdfPreview(id)}>{data.attachments.find(a=>a.id===id)?.name}</Button>)}</div>}{selected.includes(original)?<DocumentPreview key={original} id={original}/>:pdfPreview&&extraPdfs.includes(pdfPreview)?<ImposedPreview id={pdfPreview} input={{id:active?.id??'preview',...pdfOutput}}/>:selected.length>0&&plan?editorOpen?<p>Photo sheet editor is open.</p>:photoPreview:<p>Select photographs to arrange them automatically.</p>}{problem&&<p role="alert">{problem}</p>}
+ {lowQuality.length>0&&<div role="status"><p>{lowQuality.length} selected {lowQuality.length===1?'photo is':'photos are'} below {qualityThreshold} DPI at the requested size.</p><label className="check"><input type="checkbox" checked={!qualityBlocked} onChange={e=>setAcceptedQuality(e.target.checked?qualityKey:'')}/> Accept the lower print resolution</label></div>}<div className="print-calculation-summary"><div><small>Photographs</small><strong>{selected.length}</strong></div><div><small>Requested prints</small><strong>{plan?.photoCount??0}</strong></div><div><small>Physical photo sheets</small><strong>{sheets}</strong></div><div><small>Printed photo sides</small><strong>{photoQuote?.printedSides??0}</strong></div><div><small>Estimate</small><strong>{money(total)}</strong></div></div><p>Total physical sheets including PDFs: {sheets+(pdfCalculation?.totalPhysicalSheets??0)}</p><p>Photo subtotal: {money(photoTotal)} / PDF subtotal: {money(pdfTotal)} ({pdfCopies} copies, {pdfNup}-up, {pdfDuplex==='simplex'?'one-sided':'two-sided'}; each PDF starts on a fresh sheet)</p>{photoQuote&&<dl className="detail-list"><div><dt>Paper ({photoQuote.physicalSheets} physical sheets)</dt><dd>{money(photoQuote.paperCost)}</dd></div><div><dt>Photo printing and setup</dt><dd>{money(photoQuote.printing)}</dd></div><div><dt>Finishing</dt><dd>{money(photoQuote.finishing)}</dd></div><div><dt>Colour / black &amp; white sides</dt><dd>{photoQuote.colourSides} / {photoQuote.blackAndWhiteSides}</dd></div></dl>}<p className="subtle">{priceSource==='shop print rates'?'No photo rate configured. Using shop print rates per physical sheet.':priceSource==='shop photo rate'?'Using the shop photo rate.':'Using the saved photo pricing rule.'}</p><p className="subtle">Photo billing: {photoQuote?.basis??'sheet'} ({photoQuote?.units??0} units), printing {money(photoQuote?.printing??0)}, finishing {money(photoQuote?.finishing??0)}. Fit preserves the whole image; Fill crops only when selected. Originals remain unchanged.</p></Panel>
+ <Panel><div className="stack"><h2>Bulk photo settings</h2>
+ <div className="actions">
+ <Button className="secondary" onClick={()=>{setPaper('A4');setLandscape(true);setGrid(true);setRows(2);setColumns(2);setOrder('horizontal');setDuplex('simplex');setGuides(false)}}>A4 landscape: 4 photos per side</Button>
+ <Button className="secondary" onClick={()=>{setGrid(true);setRows(1);setColumns(1);setGuides(false)}}>Full page: 1 photo per side</Button>
+ </div>
+ <label>Quick frame or grid<select value="" onChange={e=>{const [target,spec]=e.target.value.includes(':')?e.target.value.split(':'):['',e.target.value];const [r,c]=spec.split('x').map(Number);if(target)setPaper(target as typeof paper);if(r&&c){setGrid(true);setRows(r);setColumns(c);setGuides(false)}}}><option value="">Choose a page fraction or grid</option>{(['A4','A3','A5'] as const).map(value=><option key={value} value={value+':1x1'}>{value} full page</option>)}{grids.map(([label,r,c])=><option key={label} value={r+'x'+c}>{label} ({r*c} per side)</option>)}</select></label>
+ <small>Page fractions divide the printable area. Pack by photo size preserves exact physical dimensions.</small>
+ <label>Photo layout<select value={grid?'grid':'sizes'} onChange={e=>setGrid(e.target.value==='grid')}><option value="sizes">Pack by photo size</option><option value="grid">Custom grid / fill page</option></select></label>
+ {grid&&<div className="form-grid"><label>Rows<input type="number" min="1" max="8" value={rows} onChange={e=>setRows(Number(e.target.value))}/></label><label>Columns<input type="number" min="1" max="8" value={columns} onChange={e=>setColumns(Number(e.target.value))}/></label><label>Grid order<select value={order} onChange={e=>setOrder(e.target.value as typeof order)}><option value="horizontal">Across rows</option><option value="vertical">Down columns</option><option value="rightToLeft">Right to left</option><option value="bottomToTop">Bottom row first</option></select></label></div>}
+ <label>Photo printing sides<select value={duplex} onChange={e=>setDuplex(e.target.value as typeof duplex)}><option value="simplex">One-sided</option><option value="longEdge">Automatic two-sided (long edge)</option><option value="shortEdge">Automatic two-sided (short edge)</option><option value="manualLongEdge">Manual two-sided (long edge)</option><option value="manualShortEdge">Manual two-sided (short edge)</option></select></label>
+ {twoSided&&<small>The first photo side prints on the front, the next on the back. Change the photo order below to choose the pairs.</small>}
+ <label>Printer<PrinterSelect value={printer} change={setPrinter}/></label><Button className="secondary" disabled={!printer} onClick={()=>void run('printerDialog',{printer,kind:'preferences'})}>Printer preferences</Button>{printerProblem&&<p role="status">{printerProblem}</p>}<label>Pricing media category<input value={media} maxLength={80} onChange={e=>setMedia(e.target.value)}/></label><small>Billing category only. Select the matching actual media in Printer preferences.</small><label>Paper<select value={paper} onChange={e=>setPaper(e.target.value as typeof paper)}>{['A4','A3','A5','A6','Letter','Legal','Custom'].map(p=><option key={p}>{p}</option>)}</select></label>{paper==='Custom'&&<div className="form-grid"><label>Paper width mm<input type="number" min="20" max="2000" value={paperWidth} onChange={e=>setPaperWidth(Number(e.target.value))}/></label><label>Paper height mm<input type="number" min="20" max="2000" value={paperHeight} onChange={e=>setPaperHeight(Number(e.target.value))}/></label></div>}{!grid&&<><label>Photo size<select value={size} onChange={e=>setSize(e.target.value)}>{[...Object.keys(sizes),'Custom'].map(s=><option key={s}>{s}</option>)}</select></label>{size==='Custom'&&<div className="form-grid"><label>Width<input type="number" min=".1" value={customWidth} onChange={e=>setCustomWidth(Number(e.target.value))}/></label><label>Height<input type="number" min=".1" value={customHeight} onChange={e=>setCustomHeight(Number(e.target.value))}/></label><label>Units<select value={unit} onChange={e=>setUnit(e.target.value as typeof unit)}><option>mm</option><option>cm</option><option>in</option></select></label></div>}</>}<label>Copies per photo<input type="number" min="1" max="100" value={quantity} onChange={e=>setQuantity(Number(e.target.value))}/></label><label>Image fitting<select value={fit} onChange={e=>{const next=e.target.value as typeof fit;setFit(next);if(grid)setItems(prior=>({...prior,...Object.fromEntries(selected.map(id=>[id,{...(prior[id]??defaultItem()),fit:next}]))}))}}><option value="contain">Fit whole photo</option><option value="cover">Fill and crop (approved)</option></select></label><Button onClick={()=>setItems(prior=>({...prior,...Object.fromEntries(selected.map(id=>[id,{...(prior[id]??defaultItem()),...(!grid&&{widthMm:defaultItem().widthMm,heightMm:defaultItem().heightMm}),quantity,fit}]))}))}>{grid?'Apply fit and copies to selected':'Apply size and copies to selected'}</Button><label className="check"><input type="checkbox" checked={landscape} onChange={e=>setLandscape(e.target.checked)}/>Landscape paper</label><label className="check" title={capabilities?.borderless?'Driver reports zero hard margins':'This printer has not confirmed borderless output'}><input type="checkbox" disabled={!capabilities?.borderless} checked={margin===0&&whiteBorder===0} onChange={e=>{setMargin(e.target.checked?0:5);if(e.target.checked)setWhiteBorder(0)}}/>Borderless (driver support required)</label><label>Job photo ink<select value={ink==='inherit'?(colour?'colour':'mono'):ink} onChange={e=>{const value=e.target.value as PhotoInk;setInk(value);setColour(value==='colour'||value==='original'||value==='sepia')}}>{inks.filter(([value])=>value!=='inherit').map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+ <Button className="secondary" disabled={!selected.length} onClick={()=>setItems(prior=>({...prior,...Object.fromEntries(selected.map(id=>[id,{...(prior[id]??defaultItem()),ink:ink==='inherit'?(colour?'colour':'mono'):ink}]))}))}>Apply job ink to selected</Button><div className="form-grid"><label>Margins mm<input type="number" min="0" max="150" value={margin} onChange={e=>setMargin(Number(e.target.value))}/></label><label>Spacing mm<input type="number" min="0" max="150" value={gap} onChange={e=>setGap(Number(e.target.value))}/></label></div>{!grid&&<><label>Arrangement<select value={arrangement} onChange={e=>{const mode=e.target.value as typeof arrangement;if(mode==='manual'&&plan)setPositions(planPhotos({...options,photoArrangement:'auto',photoPositions:undefined},infos).sides.flatMap((side,sheet)=>side.placements.map(p=>({file:p.file!,copy:p.copy!,sheet,x:p.cutBox!.x,y:p.cutBox!.y}))));setArrangement(mode)}}><option value="auto">Auto best fit / mixed sizes</option><option value="grid">Grid (matching sizes)</option><option value="rows">Rows</option><option value="columns">Columns</option><option value="manual">Manual positions</option></select></label><Button className="secondary" onClick={()=>{setArrangement('auto');setPositions([]);setPast([]);setFuture([])}}>Auto Arrange / reset positions</Button>{arrangement==='manual'&&<details open><summary>Manual positions in millimetres</summary><label>Snap drag to grid (mm)<input type="number" min="0" max="25" step="1" value={snap} onChange={e=>setSnap(Math.max(0,Math.min(25,Number(e.target.value))))}/></label><small>Zero allows free movement.</small><div className="actions"><Button className="secondary" disabled={!past.length} onClick={undoMove}>Undo move</Button><Button className="secondary" disabled={!future.length} onClick={redoMove}>Redo move</Button></div>{positions.map((p,index)=><div className="form-grid" key={p.file+':'+p.copy}><small>{data.attachments.find(a=>a.id===p.file)?.name} / copy {p.copy+1}</small>{(['sheet','x','y'] as const).map(key=><label key={key}>{key==='sheet'?'Sheet number':key+' mm'}<input type="number" min={key==='sheet'?1:0} max={key==='sheet'?200:2000} step={key==='sheet'?1:.1} value={key==='sheet'?p.sheet+1:p[key]} onChange={e=>movePositions(positions.map((v,i)=>i===index?{...v,[key]:Number(e.target.value)-(key==='sheet'?1:0)}:v))}/></label>)}{p.frame&&(['width','height'] as const).map(dimension=><label key={dimension}>Frame {dimension} (mm)<input type="number" min="1" max="2000" step=".1" value={p.frame![dimension]} onChange={e=>movePositions(positions.map((item,i)=>i===index?{...item,frame:{...item.frame!,[dimension]:Number(e.target.value)}}:item))}/></label>)}<div className="actions">{(['left','center','right'] as const).map(alignment=><Button key={alignment} className="quiet" disabled={!plan} onClick={()=>alignPosition(index,alignment)}>Align {alignment}</Button>)}</div></div>)}</details>}<label>Maximum photos per sheet<select value={maxPerSheet} onChange={e=>setMaxPerSheet(Number(e.target.value))}><option value={0}>Auto best fit</option>{[1,2,4,6,8,9,12,16].map(n=><option key={n} value={n}>Up to {n}</option>)}</select></label></>}<label>White border mm<input type="number" min="0" max="20" value={whiteBorder} onChange={e=>setWhiteBorder(Number(e.target.value))}/></label><label className="check"><input type="checkbox" checked={guides} onChange={e=>setGuides(e.target.checked)}/>Cut guides</label>
+ <details><summary>Configure {twoSided?'two-sided':'one-sided'} photo pricing</summary><label>Billing basis<select value={billing} onChange={e=>setBilling(e.target.value as typeof billing)}><option value="sheet">Per physical sheet</option><option value="side">Per printed side</option><option value="photo">Per requested photo print</option></select></label><label>Black &amp; white rate LKR<input type="number" min="0" step=".01" value={monoRate} onChange={e=>setMonoRate(Number(e.target.value))}/></label><label>Colour rate LKR<input type="number" min="0" step=".01" value={rate} onChange={e=>setRate(Number(e.target.value))}/></label><label>Paper cost per physical sheet (LKR)<input type="number" min="0" step=".01" value={paperRate} onChange={e=>setPaperRate(Number(e.target.value))}/></label><label>Finishing fee (LKR)<input type="number" min="0" step=".01" value={finishing} onChange={e=>setFinishing(Number(e.target.value))}/></label><label>Fixed service fee LKR<input type="number" min="0" step=".01" value={setupFee} onChange={e=>setSetupFee(Number(e.target.value))}/></label>{billing==='photo'&&priceSizes.map(key=><label key={key}>Size {key.split('x').map(n=>Number(n)/100).join(' x ')} mm rate LKR<input type="number" min="0" step=".01" value={sizeRates[key]??rate} onChange={e=>setSizeRates(prev=>({...prev,[key]:Number(e.target.value)}))}/></label>)}<Button className="secondary" onClick={async()=>{const existing=findPhotoPricing(pricingRules,options);if(await run('savePricingRule',{id:existing?.id,name:paper+' '+media+' photo pricing',media,paper,method:'photo',duplex:twoSided,policy:{...existing?.policy,basis:billing,mono:Math.round(monoRate*100),colour:Math.round(rate*100),paperPerSheet:Math.round(paperRate*100),finishing:Math.round(finishing*100),setup:Math.round(setupFee*100),photoSizes:billing==='photo'?Object.fromEntries(Object.entries(sizeRates).map(([key,value])=>[key,Math.round(value*100)])):undefined}},'Shop photo pricing saved'))setPricingRules(await window.bloom.call('pricingRules',null))}}>Save shop pricing for {paper}</Button><p>Applies to future estimates for this paper. Existing recorded order totals change only when explicitly saved.</p></details><details><summary>Rendering quality</summary><label>Warn below source DPI<input type="number" min="50" max="600" value={qualityThreshold} onChange={e=>setQualityThreshold(Math.max(50,Math.min(600,Number(e.target.value))))}/></label><label>Document raster DPI<select value={dpi} onChange={e=>setDpi(Number(e.target.value))}>{[72,150,300,600].map(n=><option key={n}>{n}</option>)}</select></label><label className="check"><input type="checkbox" checked={smoothing} onChange={e=>setSmoothing(e.target.checked)}/>Image smoothing</label><p>Printer quality, media and toner-saving options are managed in Printer preferences. Sharpening is applied to the disposable output raster. Manual photo positions are edited in millimetres.</p></details><details><summary>Include customer PDFs in this order</summary><label>Separate PDF printer<PrinterSelect value={pdfPrinter} change={setPdfPrinter}/></label><small>Leave empty to use the photo printer.</small><div className="form-grid"><label>PDF copies<input type="number" min="1" max="100" value={pdfCopies} onChange={e=>setPdfCopies(Number(e.target.value))}/></label><label>PDF pages per side<select value={pdfNup} onChange={e=>setPdfNup(Number(e.target.value))}>{[1,2,4,6,8,9,16].map(n=><option key={n}>{n}</option>)}</select></label><label>PDF sides<select value={pdfDuplex} onChange={e=>setPdfDuplex(e.target.value as typeof pdfDuplex)}><option value="simplex">One-sided</option><option value="longEdge">Duplex long edge</option><option value="shortEdge">Duplex short edge</option></select></label></div><label className="check"><input type="checkbox" checked={pdfColour} onChange={e=>setPdfColour(e.target.checked)}/>Colour PDFs</label><p>PDFs and photo sheets submit separately within the same order. Confirm the first submission before sending the next.</p>{data.attachments.filter(a=>a.status==='Ready'&&a.mime==='application/pdf'&&a.customer_id===(active?active.customer_id:customer==='walk-in'?null:customer)&&(!active||adding||active.files.includes(a.id))).map(a=><label className="check" key={a.id}><input type="checkbox" checked={extraPdfs.includes(a.id)} onChange={e=>setExtraPdfs(ids=>e.target.checked?[...ids,a.id]:ids.filter(id=>id!==a.id))}/>{a.name} {pdfPages[a.id]!==undefined&&`(${pdfPages[a.id]} pages)`}</label>)}</details><details><summary>Photo order, quantities and edits</summary>{!grid&&<label className="check"><input type="checkbox" checked={lockAspect} onChange={e=>setLockAspect(e.target.checked)}/> Lock each photo frame's proportions while resizing</label>}{selected.map((id,index)=>{const item=photoItems[id];return <div className="stack photo-edit-item" key={id} draggable onDragStart={e=>e.dataTransfer.setData('text/plain',id)} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const dragged=e.dataTransfer.getData('text/plain');if(!selected.includes(dragged))return;movePhoto(selected.indexOf(dragged),index)}}><strong>{index+1}. {data.attachments.find(a=>a.id===id)?.name}</strong><div className="actions">{[-1,1].map(step=><Button key={step} className="quiet" disabled={index+step<0||index+step>=selected.length} onClick={()=>movePhoto(index,index+step)}>{step<0?'Move earlier':'Move later'}</Button>)}</div>{infos.find(d=>d.id===id)&&<small>{resolutions.get(id)??'-'} effective DPI{resolutions.has(id)?' ('+qualityLabel(resolutions.get(id)!)+')':''}</small>}<div className="form-grid">{!grid&&!(arrangement==='manual'&&positions.some(p=>p.file===id&&p.frame))&&<><label>Width mm<input type="number" min="10" max="1000" value={item.widthMm} onChange={e=>update(id,{widthMm:Number(e.target.value),...(lockAspect&&{heightMm:Number((Number(e.target.value)*item.heightMm/item.widthMm).toFixed(3))})})}/></label><label>Height mm<input type="number" min="10" max="1000" value={item.heightMm} onChange={e=>update(id,{heightMm:Number(e.target.value),...(lockAspect&&{widthMm:Number((Number(e.target.value)*item.widthMm/item.heightMm).toFixed(3))})})}/></label></>}<label>Copies<input type="number" min="1" max="100" value={item.quantity} onChange={e=>update(id,{quantity:Number(e.target.value)})}/></label><label>Fit<select value={item.fit} onChange={e=>update(id,{fit:e.target.value as Item['fit']})}><option value="contain">Fit whole photo</option><option value="cover">Fill and crop (approved)</option></select></label><label>Rotation<select value={item.rotation} onChange={e=>update(id,{rotation:Number(e.target.value)})}>{[0,90,180,270].map(n=><option key={n}>{n}</option>)}</select></label></div><details><summary>Image edits (original preserved)</summary><div className="form-grid">{(['brightness','contrast','saturation'] as const).map(key=><label key={key}>{key}<input type="number" min={key==='saturation'?0:25} max="200" value={item[key]??100} onChange={e=>update(id,{[key]:Number(e.target.value)})}/></label>)}<label>Sharpness %<input type="number" min="0" max="100" value={item.sharpness??0} onChange={e=>update(id,{sharpness:Number(e.target.value)})}/></label><label>Zoom (crops beyond frame)<input type="number" min="1" max="4" step=".1" value={item.zoom??1} onChange={e=>update(id,{zoom:Number(e.target.value)})}/></label><label>Background<input type="color" value={item.background??'#ffffff'} onChange={e=>update(id,{background:e.target.value})}/></label><label>Photo ink<select value={item.ink??'inherit'} onChange={e=>update(id,{ink:e.target.value as Item['ink']})}>{inks.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label></div><label className="check"><input type="checkbox" checked={item.flipX??false} onChange={e=>update(id,{flipX:e.target.checked})}/>Flip horizontal</label><label className="check"><input type="checkbox" checked={item.flipY??false} onChange={e=>update(id,{flipY:e.target.checked})}/>Flip vertical</label><p>Crop coordinates in percent of the original photograph:</p><div className="form-grid">{(['x','y','width','height'] as const).map(key=><label key={key}>{key}<input type="number" min={key==='width'||key==='height'?1:0} max="100" value={Math.round((item.crop?.[key]??(key==='width'||key==='height'?1:0))*100)} onChange={e=>update(id,{crop:{x:0,y:0,width:1,height:1,...item.crop,[key]:Number(e.target.value)/100}})}/></label>)}</div><Button className="secondary" onClick={()=>update(id,{autoContrast:true,denoise:15,sharpness:20})}>Auto Enhance photo</Button>
+ <label className="check"><input type="checkbox" checked={!!item.autoContrast} onChange={e=>update(id,{autoContrast:e.target.checked})}/> Auto contrast</label>
+ {([['exposure','Exposure (EV)',-2,2,.1],['warmth','White balance warmth',-100,100,1],['shadows','Shadows',-100,100,1],['highlights','Highlights',-100,100,1],['denoise','Noise reduction',0,100,1]] as const).map(([field,label,min,max,step])=><label key={field}>{label}<input type="number" min={min} max={max} step={step} value={item[field]??0} onChange={e=>update(id,{[field]:Number(e.target.value)})}/></label>)}<Button className="quiet" onClick={()=>update(id,{sharpness:0,crop:undefined,zoom:1,brightness:100,contrast:100,saturation:100,flipX:false,flipY:false,ink:'inherit',autoContrast:false,exposure:0,warmth:0,shadows:0,highlights:0,denoise:0})}>Reset image edits</Button></details><Button className="quiet" disabled={item.quantity>=100||!plan} onClick={()=>duplicate(id)}>{!grid&&arrangement==='manual'?'Duplicate onto new side':'Duplicate one copy'}</Button><Button className="quiet" onClick={()=>removePhoto(id)}>Remove</Button></div>})}</details>
+ {active&&<><label>Reason for saving order changes<input value={editReason} onChange={e=>setEditReason(e.target.value)} maxLength={500}/></label><Button className="secondary" disabled={!plan||!!problem||!pdfReady||editReason.trim().length<3||busy} onClick={()=>void run('updatePhotoOrder',{id:active.id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total,reason:editReason},'Photo order settings and total saved')}>Save order files, settings and estimate</Button></>}{active&&<p>Recorded order: {money(active.total)}. Printing a revised layout keeps the recorded total unchanged.</p>}
+ <details><summary>Order charges and discount</summary><div className="form-grid"><label>Extra charges (LKR)<input type="number" min="0" step=".01" value={charge} onChange={e=>setCharge(Number(e.target.value))}/></label><label>Discount (LKR)<input type="number" min="0" step=".01" value={discount} onChange={e=>setDiscount(Number(e.target.value))}/></label></div><p>Photo {money(photoTotal)} / PDF {money(pdfTotal)} / Extras {money(adjustments.charge)} / Discount {money(adjustments.discount)}</p></details>
+ <div className="photo-print-actions"><small>{selected.length} selected / {photoQuote?.requestedPrints??0} prints / {sheets} physical {sheets===1?'sheet':'sheets'}</small><div className="total"><span>Current estimate</span><strong>{money(total)}</strong></div>{active?<>{printerProblem&&<small>{printerProblem}</small>}{qualityBlocked&&!exportPrinter&&<small>Accept the lower print resolution under the preview to enable printing.</small>}{photoSubmitButtons}{extraPdfs.length>0&&<><Button className="secondary" disabled={!pdfReady||!!problem||!pdfOutput.printer} onClick={()=>void run('print',{id:active.id,...pdfOutput},'PDF submission accepted; verify physical printing in Print Queue.')}>Print PDFs separately</Button><Button className="secondary" disabled={!pdfReady||!!problem} onClick={()=>void run('savePrintPdf',{id:active.id,...pdfOutput},'Prepared PDF document layout saved')}>Save PDF print layout</Button></>}</>:<Button disabled={!plan||!!problem||!pdfReady||busy} onClick={()=>void create()}>Create photo print order</Button>}</div>
+ <p className="subtle">Automatic arrangement updates immediately. Physical submission validates printer capabilities. Media, borderless and quality use the existing native printer preferences; direct controls are not implemented here.</p></div></Panel>{editorOpen&&<DetailDrawer title="Photo layout editor" presentation="wide" onClose={()=>setEditorOpen(false)}>
+ <div className="photo-editor-popup">
+ <div>{photoPreview??<p>{problem||'Preparing selected photos...'}</p>}</div>
+ <aside className="stack">
+ <Button className="secondary" disabled={!plan} onClick={editOnSheet}>Fit frames to photos</Button><label>Photo gap (mm)<input type="number" min="0" max={gap} step=".5" value={editorGap??gap} onChange={e=>setEditorGap(Math.max(0,Math.min(gap,Number(e.target.value))))}/></label>
+ <Button className="secondary" disabled={!plan} onClick={fillSheets}>Fill sheet evenly</Button>
+ <strong>Print order ({selected.length} photos)</strong>
+ <small>Drag a row or use Earlier and Later to change which photos fill the sheet positions.</small>
+ <div className="photo-editor-order">{selected.map((id,index)=><div className="photo-editor-order-item" key={id} draggable onDragStart={e=>e.dataTransfer.setData('text/plain',id)} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const from=selected.indexOf(e.dataTransfer.getData('text/plain'));if(from>=0)movePhoto(from,index)}}>
+ <strong>{index+1}. {data.attachments.find(file=>file.id===id)?.name}</strong><small>{photoItems[id].quantity} copies / {stamp(data.attachments.find(file=>file.id===id)?.created??'')}</small>
+ <div className="actions"><Button className="quiet" aria-label={'Move photo '+(index+1)+' earlier'} disabled={index===0} onClick={()=>movePhoto(index,index-1)}>Earlier</Button><Button className="quiet" aria-label={'Move photo '+(index+1)+' later'} disabled={index===selected.length-1} onClick={()=>movePhoto(index,index+1)}>Later</Button></div>
+ </div>)}</div>
+ <label className="check"><input type="checkbox" checked={lockAspect} onChange={e=>setLockAspect(e.target.checked)}/> Lock frame proportions</label>
+ <div className="actions"><Button className="secondary" disabled={!past.length} onClick={undoMove}>Undo</Button><Button className="secondary" disabled={!future.length} onClick={redoMove}>Redo</Button></div>
+ <p>{sheets} physical sheets / {money(total)}</p>
+ {printerProblem&&<small>{printerProblem}</small>}
+ {qualityBlocked&&<label className="check"><input type="checkbox" onChange={e=>setAcceptedQuality(e.target.checked?qualityKey:'')}/> Accept lower print resolution</label>}
+ {active?photoSubmitButtons:<Button disabled={!plan||!!problem||!pdfReady||busy} onClick={()=>void create()}>Create photo print order</Button>}<Button className="secondary" onClick={()=>setEditorOpen(false)}>Done editing</Button>
+ </aside>
+ </div>
+ </DetailDrawer>}
+ </div>
+}
