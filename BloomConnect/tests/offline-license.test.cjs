@@ -76,10 +76,15 @@ test('renewal authorizes the same device from the signed renewal start', () => {
 
 test('purchase opens the support WhatsApp chat with the Device ID prefilled', async () => {
   let opened;
-  await openLicensePurchase(deviceId, async url => { opened = new URL(url); });
+  await openLicensePurchase(deviceId, '  PaperBloom   Print Shop  ', async url => { opened = new URL(url); });
   assert.equal(opened.origin, 'https://wa.me');
   assert.equal(opened.pathname, '/94767660922');
-  assert.equal(opened.searchParams.get('text'), 'Hi, I would like to buy a BloomConnect license.\nDevice ID: ' + deviceId);
+  const message = opened.searchParams.get('text');
+  assert.match(message, /365-day BloomConnect license/);
+  assert.match(message, /දින 365 බලපත්‍රයක්/);
+  assert.ok(message.includes('Shop name / වෙළඳසැලේ නම: PaperBloom Print Shop'));
+  assert.ok(message.includes('Device ID: ' + deviceId));
+  await assert.rejects(openLicensePurchase(deviceId, '  ', async () => assert.fail('Unexpected WhatsApp launch')), /shop name/);
 });
 
 const mobile = require('./fixtures/mobile-license.json');

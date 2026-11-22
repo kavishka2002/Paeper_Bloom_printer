@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('offlineLicense',{
   paste:()=>ipcRenderer.invoke('bloom:license','paste'),
   copy:()=>ipcRenderer.invoke('bloom:license','copy'),
   support:()=>ipcRenderer.invoke('bloom:license','support'),
-  buy:()=>ipcRenderer.invoke('bloom:license','buy'),
+  buy:(shopName:string)=>ipcRenderer.invoke('bloom:license','buy',shopName),
   activate:(code:string)=>ipcRenderer.invoke('bloom:license','activate',code),
   importFile:()=>ipcRenderer.invoke('bloom:license','import'),
 });

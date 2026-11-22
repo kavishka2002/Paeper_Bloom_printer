@@ -295,7 +295,10 @@ else void app.whenReady().then(async()=>{
       return text.trim();
     }
     if(action==='support')return performSupportAction('whatsapp',url=>shell.openExternal(url),value=>clipboard.writeText(value));
-    if(action==='buy')return openLicensePurchase(licensing.status().deviceId,url=>shell.openExternal(url));
+    if(action==='buy'){
+      if(typeof value!=='string'||value.length>160)throw new Error('Enter a shop name of up to 160 characters.');
+      return openLicensePurchase(licensing.status().deviceId,value,url=>shell.openExternal(url));
+    }
     let code:string;
     if(action==='import'){
       const selected=await dialog.showOpenDialog(main,{properties:['openFile'],filters:[{name:'BloomConnect license',extensions:['bclicense','txt']}]});

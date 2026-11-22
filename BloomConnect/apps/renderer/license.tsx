@@ -1,7 +1,8 @@
 import {useEffect, useState, type ReactNode} from 'react';
-import {useQuery} from '@tanstack/react-query';
+import {useQuery,useQueryClient} from '@tanstack/react-query';
 import {Button, Panel} from './context';
 import {supportPhone} from '../../packages/shared/support';
+import type {Snapshot} from '../../packages/shared/contracts';
 import type {LicenseStatus} from '../../packages/licensing/license';
 import './license.css';
 
@@ -13,7 +14,7 @@ declare global {
       support: () => Promise<void>;
       status: () => Promise<LicenseStatus>;
       copy: () => Promise<void>;
-      buy: () => Promise<void>;
+      buy: (shopName:string) => Promise<void>;
       activate: (code: string) => Promise<LicenseStatus>;
       importFile: () => Promise<LicenseStatus | null>;
     };
@@ -50,6 +51,9 @@ const expiryFormat = new Intl.DateTimeFormat('en-LK', {
 export function LicensedWorkspace({children}: {children: ReactNode}) {
   const query = useQuery({queryKey: ['offline-license'], queryFn: () => window.offlineLicense.status(), refetchInterval: 1000, retry: false});
   const license = query.data;
+  const workspace = useQueryClient().getQueryData<Snapshot>(['data']);
+  const [shopName, setShopName] = useState<string>();
+  const purchaseShop = shopName ?? workspace?.settings?.shop ?? '';
   const [show, setShow] = useState(false);
   const [code, setCode] = useState('');
   const [notice, setNotice] = useState('');
@@ -80,7 +84,7 @@ export function LicensedWorkspace({children}: {children: ReactNode}) {
     setOpeningWhatsApp(true);
     setNotice('');
     try {
-      await (purchase ? window.offlineLicense.buy() : window.offlineLicense.support());
+      await (purchase ? window.offlineLicense.buy(purchaseShop) : window.offlineLicense.support());
       setNotice(purchase ? 'Review the message in WhatsApp and press Send.' : 'Support opened in WhatsApp.');
     } catch (error) {
       setNotice(error instanceof Error ? error.message.replace(/^Error invoking remote method 'bloom:license':\s*(?:Error:\s*)?/, '') : 'Could not open WhatsApp.');
@@ -122,7 +126,10 @@ export function LicensedWorkspace({children}: {children: ReactNode}) {
     <div className="license-actions">
       <Button className="secondary" onClick={() => void window.offlineLicense.copy().then(() => setNotice('Device ID copied.'), () => setNotice('Could not copy device ID.'))}>Copy Device ID</Button>
       <Button className="secondary" disabled={openingWhatsApp} onClick={() => void openWhatsApp(false)}>Contact Support</Button>
-      <Button className="secondary" disabled={openingWhatsApp} onClick={() => void openWhatsApp(true)}>{active || license.reason === 'expired' ? 'Renew License' : 'Buy license on WhatsApp'}</Button>
+    </div>
+    <label>Shop name for WhatsApp request<input maxLength={160} value={purchaseShop} onChange={event => setShopName(event.target.value)} /></label>
+    <div className="license-actions">
+      <Button className="secondary" disabled={openingWhatsApp || !purchaseShop.trim()} onClick={() => void openWhatsApp(true)}>{active || license.reason === 'expired' ? 'Renew License' : 'Buy license on WhatsApp'}</Button>
     </div>
     <p>For a replacement device, contact {supportPhone} with your new Device ID.</p>
     {!showForm && <Button onClick={() => setEnteringLicense(true)}>Enter New License</Button>}
