@@ -18,3 +18,10 @@ export async function performSupportAction(action:SupportAction,openExternal:(ur
    :'Windows could not open WhatsApp support. Use '+supportPhone+' to contact us.');
  }
 }
+
+export async function openLicensePurchase(deviceId:string,openExternal:(url:string)=>Promise<void>){
+ const url=new URL(externalLinks.whatsapp);
+ url.searchParams.set('text','Hi, I would like to buy a BloomConnect license.\nDevice ID: '+deviceId);
+ try{await openExternal(url.toString())}
+ catch{throw new Error('Windows could not open WhatsApp. Contact '+supportPhone+' and share your Device ID.')}
+}

@@ -1,5 +1,5 @@
 import {execFile,spawn} from 'node:child_process';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {z} from 'zod';
@@ -11,8 +11,27 @@ export async function windowsBridge(script:string,action:'capabilities'|'submit'
   if(process.platform!=='win32')throw new Error('Windows printer APIs are only available on Windows.');
   const folder=await mkdtemp(join(tmpdir(),'bloom-driver-'));
   try{
-    const input=join(folder,'request.json');await writeFile(input,JSON.stringify(request),'utf8');
-    const output=await new Promise<string>((resolve,reject)=>execFile('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script,'-Action',action,'-InputFile',input],{windowsHide:true,timeout:action==='submit'?120000:30000,maxBuffer:4*1024*1024,encoding:'utf8'},(error,stdout,stderr)=>error?reject(new Error((stderr||error.message).slice(0,1500))):resolve(stdout)));
+    const input=join(folder,'request.json');
+    // PowerShell needs a real filesystem path when Electron is packaged in app.asar.
+    const scriptPath=join(folder,'printer.ps1');
+    await writeFile(scriptPath,await readFile(script));
+    await writeFile(input,JSON.stringify(request),'utf8');
+    const timeout=action==='submit'?120000:60000;
+    const output=await new Promise<string>((resolve,reject)=>{
+      execFile('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptPath,'-Action',action,'-InputFile',input],
+        {windowsHide:true,timeout,maxBuffer:4*1024*1024,encoding:'utf8'},(error,stdout,stderr)=>{
+          if(!error){resolve(stdout);return}
+          const operation=action==='capabilities'?'read printer capabilities':'submit the print job';
+          const detail=stderr.trim()||stdout.trim();
+          if(error.killed){
+            reject(new Error(action==='capabilities'
+              ?'Windows did not return printer capabilities within 60 seconds. Check the printer connection and retry.'
+              :'Windows did not confirm print submission within 120 seconds. Check the Windows print queue before trying again.'));
+          }else{
+            reject(new Error(detail.slice(0,1500)||'Windows could not '+operation+' (PowerShell '+(error.code??error.signal??'error')+').'));
+          }
+        });
+    });
     return JSON.parse(output.replace(/^\uFEFF/,''));
   }finally{await rm(folder,{recursive:true,force:true})}
 }

@@ -87,6 +87,15 @@ export function Documents(){
  }
 
  const files=data.attachments.filter(a=>match(state.search,a.name,name(data,a.customer_id))&&(!byCustomer||a.customer_id===byCustomer)&&(!type||a.mime.startsWith(type))&&(!date||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Colombo'}).format(new Date(a.created))===date));
+ const selectedArePhotos=selected.length>0&&selected.every(id=>data.attachments.find(file=>file.id===id)?.mime.startsWith('image/'));
+ const selectPhotos=()=>{
+  const first=data.attachments.find(file=>file.id===selected[0])??active;
+  const ready=files.filter(file=>file.status==='Ready'&&file.mime.startsWith('image/'));
+  const matching=first?ready.filter(file=>file.customer_id===first.customer_id):ready;
+  if(matching.some(file=>file.customer_id!==matching[0]?.customer_id)){error(new Error('Filter by customer or select a photo first.'));return}
+  if(matching.length>40){error(new Error('Select at most 40 photos in one order.'));return}
+  setSelected(matching.map(file=>file.id));
+ };
  const lastPage=Math.max(0,Math.ceil(files.length/12)-1), currentPage=Math.min(page,lastPage);
  const toggle=(id:string)=>{
   const item=data.attachments.find(item=>item.id===id),first=data.attachments.find(item=>selected.includes(item.id));
@@ -105,6 +114,12 @@ export function Documents(){
   try{
     const entries=ids.map(id=>data.attachments.find(a=>a.id===id));
     if(!entries.length||entries.some(item=>!item||item.status!=='Ready'||item.customer_id!==entries[0]!.customer_id))throw new Error('Select ready files belonging to the same customer.');
+    if(entries.every(item=>item!.mime.startsWith('image/'))){
+      if(ids.length>40)throw new Error('Select at most 40 photos in one order.');
+      setSelected([]);
+      state.set({view:'Print Studio',job:'',customer:entries[0]!.customer_id??'walk-in',photoStudio:true,photoDraft:ids});
+      return;
+    }
     const calculations=[];
     for(const item of entries){
       const image=item!.mime.startsWith('image/');
@@ -115,7 +130,7 @@ export function Documents(){
     await refresh();setSelected([]);state.set({view:'Print Studio',job});
   }catch(e){error(e)}finally{setCreating(false)}
  }
- return <div className="split"><Panel><div className="panel-head"><div><h2>Document library</h2><p>{files.length} matching files</p></div><Button onClick={()=>void run('import',{customer:customer||null})}><Plus size={16}/> Import files</Button></div><Tabs label="Document view" values={["Grid","List"]} value={mode} onChange={setMode}/><div className="actions filters"><select aria-label="Filter by customer" value={byCustomer} onChange={e=>{setByCustomer(e.target.value);setPage(0)}}><option value="">All customers</option>{data.customers.map(c=><option value={c.id} key={c.id}>{c.name}</option>)}</select><select aria-label="Import for customer" value={customer} onChange={e=>setCustomer(e.target.value)}><option value="">Import for walk-in</option>{data.customers.map(c=><option value={c.id} key={c.id}>{c.name}</option>)}</select><select aria-label="Type filter" value={type} onChange={e=>setType(e.target.value)}><option value="">All file types</option><option value="application/pdf">PDF</option><option value="image/">Images</option></select><input aria-label="Date filter" type="date" value={date} onChange={e=>setDate(e.target.value)}/><Button className="secondary" onClick={selectAll}>Select all ready</Button>{selected.length>0&&<Button className="quiet" onClick={()=>setSelected([])}>Clear selection</Button>}{selected.length>0&&<Button disabled={creating} onClick={()=>void create(selected)}>Batch order ({selected.length})</Button>}{selected.length>0&&selected.every(id=>data.attachments.find(file=>file.id===id)?.mime.startsWith('image/'))&&<Button className="secondary" onClick={()=>openScanner(selected)}><ScanLine size={15}/> Scan selected photos</Button>}</div>
+ return <div className="split"><Panel><div className="panel-head"><div><h2>Document library</h2><p>{files.length} matching files</p></div><Button onClick={()=>void run('import',{customer:customer||null})}><Plus size={16}/> Import files</Button></div><Tabs label="Document view" values={["Grid","List"]} value={mode} onChange={setMode}/><div className="actions filters"><select aria-label="Filter by customer" value={byCustomer} onChange={e=>{setByCustomer(e.target.value);setPage(0)}}><option value="">All customers</option>{data.customers.map(c=><option value={c.id} key={c.id}>{c.name}</option>)}</select><select aria-label="Import for customer" value={customer} onChange={e=>setCustomer(e.target.value)}><option value="">Import for walk-in</option>{data.customers.map(c=><option value={c.id} key={c.id}>{c.name}</option>)}</select><select aria-label="Type filter" value={type} onChange={e=>setType(e.target.value)}><option value="">All file types</option><option value="application/pdf">PDF</option><option value="image/">Images</option></select><input aria-label="Date filter" type="date" value={date} onChange={e=>setDate(e.target.value)}/><Button className="secondary" onClick={selectAll}>Select all ready</Button><Button className="secondary" onClick={selectPhotos}>Select matching photos</Button>{selected.length>0&&<Button className="quiet" onClick={()=>setSelected([])}>Clear selection</Button>}{selected.length>0&&<Button disabled={creating} onClick={()=>void create(selected)}>{selectedArePhotos?'Print selected photos':'Batch order'} ({selected.length})</Button>}{selectedArePhotos&&<Button className="secondary" onClick={()=>openScanner(selected)}><ScanLine size={15}/> Scan selected photos</Button>}</div>
   {mode==='Grid'?<div className="document-grid">{files.slice(currentPage*12,currentPage*12+12).map(file=><article className="document-card" key={file.id} data-selected={file.id===active?.id}>
  <button type="button" className="file-art" aria-label={'Preview '+file.name} onClick={()=>state.set({attachment:file.id})}><FileText size={24}/>{file.status==='Ready'&&<DocumentThumbnail id={file.id}/>}</button><button className="text-button" onClick={()=>state.set({attachment:file.id})}>{file.name}</button>
  <small>{name(data,file.customer_id)} · {stamp(file.created)}</small><div className="actions"><Badge>{file.status}</Badge><label className="check"><input type="checkbox" aria-label={'Select '+file.name} checked={selected.includes(file.id)} disabled={file.status!=='Ready'} onChange={()=>toggle(file.id)}/></label></div></article>)}</div>:<Table headers={['','File','Customer','Status']}>{files.map(a=><tr key={a.id}><td><input type="checkbox" aria-label={'Select '+a.name} checked={selected.includes(a.id)} disabled={a.status!=='Ready'} onChange={()=>toggle(a.id)}/></td><td><button className="text-button" onClick={()=>state.set({attachment:a.id})}>{a.name}</button><small>{stamp(a.created)}</small></td><td>{name(data,a.customer_id)}</td><td><Badge>{a.status}</Badge></td></tr>)}</Table>}{mode==="Grid"&&lastPage>0&&<div className="actions library-pager"><Button className="secondary" disabled={currentPage===0} onClick={()=>setPage(currentPage-1)}>Previous</Button><small>{currentPage+1} / {lastPage+1}</small><Button className="secondary" disabled={currentPage===lastPage} onClick={()=>setPage(currentPage+1)}>Next</Button></div>}{!files.length&&<Empty title="No matching files"><p>Import a document or image, or receive one through WhatsApp.</p></Empty>}</Panel>

@@ -7,6 +7,9 @@ export function isVirtualPrinter(name:string){
 export function isPdfPrinter(name:string,driver?:string){
   return /Microsoft Print to PDF/i.test(name)||/Microsoft Print to PDF/i.test(driver??'');
 }
+export function isFileOutputPrinter(port:string){
+  return port.split(',').some(value=>/^\s*(?:FILE|PORTPROMPT):?\s*$/i.test(value));
+}
 export function validatePrinter(s:PrintSettings,c:PrinterCapabilities){
   if(c.name!==s.printer)throw new Error('Printer capability data does not match this printer.');
   if(c.offline||c.status===7)throw new Error('The selected printer is offline.');

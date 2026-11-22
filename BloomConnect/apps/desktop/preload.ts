@@ -5,4 +5,13 @@ const api:Bridge={importDropped:(files,customer)=>ipcRenderer.invoke('bloom:drop
 }};
 contextBridge.exposeInMainWorld('bloom',api);
 contextBridge.exposeInMainWorld('startupReady',()=>ipcRenderer.invoke('bloom:startup-ready'));
+contextBridge.exposeInMainWorld('offlineLicense',{
+  status:()=>ipcRenderer.invoke('bloom:license','status'),
+  paste:()=>ipcRenderer.invoke('bloom:license','paste'),
+  copy:()=>ipcRenderer.invoke('bloom:license','copy'),
+  support:()=>ipcRenderer.invoke('bloom:license','support'),
+  buy:()=>ipcRenderer.invoke('bloom:license','buy'),
+  activate:(code:string)=>ipcRenderer.invoke('bloom:license','activate',code),
+  importFile:()=>ipcRenderer.invoke('bloom:license','import'),
+});
 contextBridge.exposeInMainWorld('printView',{load:()=>ipcRenderer.invoke('bloom:print-data'),done:(error:string)=>ipcRenderer.send('bloom:print-ready',error)});

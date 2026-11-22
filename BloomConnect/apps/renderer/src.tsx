@@ -16,13 +16,13 @@ import {groups,pageTitle,Sidebar} from './navigation';
 import {MotionConfig,PageHeader,PageSurface} from './design';
 import {preparePrint} from './pdf';
 import {useWorkspace} from './state';
+import {LicensedWorkspace} from './license';
 import '@fontsource-variable/inter';
 import '@fontsource/noto-sans-sinhala/400.css';
 import '@fontsource/noto-sans-sinhala/600.css';
 import './style.css';
 import './theme.css';
 const client=new QueryClient({defaultOptions:{queries:{retry:1,staleTime:2000}}});
-declare global{interface Window{startupReady?:()=>Promise<void>}}
 function App(){
  const s=useWorkspace(),[notice,setNotice]=useState<{text:string;error:boolean}>(),[menu,setMenu]=useState(''),[busy,setBusy]=useState(0);
  const [collapsed,setCollapsed]=useState(()=>localStorage.getItem('sidebar')==='collapsed');
@@ -44,7 +44,7 @@ function App(){
  };
  const run:React.ContextType<typeof ctx>['run']=async(op,input,message)=>{
   setBusy(n=>n+1);setNotice(undefined);
-  try{const result=await window.bloom.call(op,input);await refresh();const text=message||(result===true&&op==='backup'?'Backup saved':result===true&&op==='receipt'?'Receipt PDF saved':'');if(text)setNotice({text,error:false});return true}
+  try{const result=await window.bloom.call(op,input);if(op==='savePrintPdf'&&result===false)return false;await refresh();const text=message||(result===true&&op==='backup'?'Backup saved':result===true&&op==='receipt'?'Receipt PDF saved':'');if(text)setNotice({text,error:false});return true}
   catch(e){error(e);return false}finally{setBusy(n=>n-1)}
  };
  const toast=notice&&<div className={'toast '+(notice.error?'error':'')} role={notice.error?'alert':'status'}>{notice.error?<AlertCircle size={18}/>:<Check size={18}/>}<span>{notice.text}</span><button type="button" aria-label="Dismiss" onClick={()=>setNotice(undefined)}><X size={16}/></button></div>;
@@ -80,4 +80,4 @@ function App(){
  {busy>0&&<div className="busy" role="status" aria-label="Processing"/>}
  <main data-page={s.view}><PageHeader title={title}/><PageSurface page={s.view}>{pages[s.view]}</PageSurface></main><AppFooter/></div>{status}<PdfPrintPopup/></div></ctx.Provider>;
 }
-if(new URLSearchParams(location.search).has('print'))void preparePrint();else createRoot(document.getElementById('root')!).render(<QueryClientProvider client={client}><MotionConfig reducedMotion="user"><App/></MotionConfig></QueryClientProvider>);
+if(new URLSearchParams(location.search).has('print'))void preparePrint();else createRoot(document.getElementById('root')!).render(<QueryClientProvider client={client}><MotionConfig reducedMotion="user"><LicensedWorkspace><App/></LicensedWorkspace></MotionConfig></QueryClientProvider>);

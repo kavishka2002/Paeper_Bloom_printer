@@ -1,6 +1,7 @@
+import {useQueryClient} from '@tanstack/react-query';
 import {PhotoStudio} from './photos';
 import type {PrinterCapabilities} from '../../packages/printing/windows';
-import {isPdfPrinter,isVirtualPrinter,validatePrinter} from '../../packages/printing/capabilities';
+import {isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,validatePrinter} from '../../packages/printing/capabilities';
 import {paperNames} from '../../packages/printing/paper';
 import {BookletWizard,DocumentPricingSettings,ProfessionalSettings} from './print-settings';
 import type {PrintSettingsInput} from '../../packages/printing/settings';
@@ -29,10 +30,10 @@ export function PdfPrintPopup(){
    if(state.autoPdfPrint)pending.current.push(file.id);
   }
   if(!state.autoPdfPrint)pending.current=[];
-  if(state.pdfPrintAttachment||!pending.current.length)return;
+  if(state.pdfPrintAttachment||state.view==='Print Queue'||!pending.current.length)return;
   const next=pending.current.shift();
   if(next)state.set({pdfPrintAttachment:next});
- },[data.attachments,data.messages,state.autoPdfPrint,state.pdfPrintAttachment]);
+ },[data.attachments,data.messages,state.autoPdfPrint,state.pdfPrintAttachment,state.view]);
  const file=data.attachments.find(item=>item.id===state.pdfPrintAttachment);
  if(!file)return null;
  return <DetailDrawer key={file.id} title="PDF Print Preview" presentation="wide" onClose={()=>state.set({pdfPrintAttachment:''})}>
@@ -42,8 +43,8 @@ export function PdfPrintPopup(){
 
 function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  const {data,run,error,refresh,printers}=useData(),state=useWorkspace();
+ const queryClient=useQueryClient();
  const [popupOrder,setPopupOrder]=useState('');
- const [submitted,setSubmitted]=useState(false);
  const [popupError,setPopupError]=useState('');
  const active=data.jobs.find(j=>j.id===(attachmentId?popupOrder:state.job));
  const [wizard,setWizard]=useState(false);
@@ -56,7 +57,7 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  const [quote,setQuote]=useState(''),[quoteReason,setQuoteReason]=useState(''),[file,setFile]=useState(''),[copies,setCopies]=useState(1);
  const [matchPdfPaper,setMatchPdfPaper]=useState(false);
  const [manualPaper,setPaper]=useState<Input<'print'>['paper']>('A4'),[colour,setColour]=useState(false),[range,setRange]=useState('');
- const [printer,setPrinter]=useState(data.settings?.printer??''),[landscape,setLandscape]=useState(false),[duplex,setDuplex]=useState<Input<'print'>['duplex']>('simplex');
+ const [selectedPrinter,setPrinter]=useState(data.settings?.printer??''),[landscape,setLandscape]=useState(false),[duplex,setDuplex]=useState<Input<'print'>['duplex']>('simplex');
  const [rotation,setRotation]=useState(0),[fit,setFit]=useState<Input<'print'>['fit']>('contain'),[layout,setLayout]=useState<Input<'print'>['layout']>('single');
  const [nup,setNup]=useState<NonNullable<Input<'print'>['nup']>>(1),[booklet,setBooklet]=useState(false),[binding,setBinding]=useState<'left'|'right'>('left');
  const [marginMm,setMargin]=useState(0),[gapMm,setGap]=useState(0),[borders,setBorders]=useState(false);
@@ -104,6 +105,12 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
   }).catch(error);
   return()=>{current=false};
  },[active?.id]);
+ const printer=selectedPrinter;
+ const refreshPrinters=()=>{
+  void queryClient.invalidateQueries({queryKey:['printers']});
+  refreshCapabilities(value=>value+1);
+ };
+ useEffect(()=>{if(attachmentId)void queryClient.invalidateQueries({queryKey:['printers']})},[attachmentId,queryClient]);
  const baseOptions={...advanced,orientation,printer,paper:manualPaper,copies,colour,landscape,duplex,range,rotation:advanced.rotation??rotation,fit,layout,nup,booklet,binding,marginMm,gapMm,borders,printable:capabilities?.printable} as const;
  const pdfInfo=preview?.mime==='application/pdf'?infos[preview.id]:undefined;
  const canMatch=!!pdfInfo&&files.length===1&&nup===1&&!booklet&&!advanced.poster?.enabled;
@@ -136,9 +143,9 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  },[printer,paper,paperWidth,paperHeight,options.orientation,capabilityRefresh]);
  const twoSided=duplex!=='simplex';
  const manualDuplex=duplex==='manualLongEdge'||duplex==='manualShortEdge';
- const virtualPrinter=isVirtualPrinter(printer)||isVirtualPrinter(capabilities?.driver??'');
- const exportPrinter=isPdfPrinter(printer,capabilities?.driver);
- const hasPhysicalPrinter=printers.some(device=>!isVirtualPrinter(device.name));
+ const pdfOutput=isPdfPrinter(printer,capabilities?.driver);
+ const fileOutput=isFileOutputPrinter(capabilities?.port??'');
+ const virtualPrinter=isVirtualPrinter(printer)||isVirtualPrinter(capabilities?.driver??'')||fileOutput;
  const quickHandling=booklet?'booklet':advanced.poster?.enabled?'poster':nup>1?'multiple':'size';
  const method=booklet?'booklet':options.poster?.enabled?'poster':nup>1?'nup':'ordinary';
  const rule=pricingRules.find(value=>value.method===method&&value.paper===paper&&value.duplex===twoSided&&(!value.media||value.media==='Default'));
@@ -175,25 +182,23 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  if(estimatedTotal<0)calculationError='Discount cannot exceed the calculated order total.';
  let driverBlock=capabilityError;
  if(capabilities){try{validatePrinter(schemas.print.parse({id:active?.id??'preview',...options}),capabilities)}catch(e){driverBlock=e instanceof Error?e.message:String(e)}}
- const printBlock=active&&!exportPrinter?(
-  !printer?'Select a Windows printer above.':
-  twoSided&&virtualPrinter?(hasPhysicalPrinter?'Select a physical printer above. '+printer+' cannot print on paper.':'Windows lists only virtual printers. Add your physical printer in Windows Settings → Printers & scanners, or save the prepared PDF.'):
-  unsupportedDuplex?'Choose manual two-sided printing or a printer that supports automatic two-sided printing.':driverBlock||(!capabilities?'Checking Windows printer capabilities.':'')
- ):'';
+ const printerNotice=!printer?(printers.length?'Select a Windows printer.':'Windows returned no printers. Add one under Windows Settings > Printers & scanners, then refresh.'):
+  pdfOutput?'This printer creates a PDF file. Choose a physical printer to print on paper.':
+  unsupportedDuplex?'Choose a physical printer for two-sided printing, or manual duplex when automatic duplex is unavailable.':
+  driverBlock||(!capabilities?'Checking Windows printer capabilities.':virtualPrinter?'This virtual printer can open a Windows dialog or another app.':'');
+ const printBlock=active&&!pdfOutput&&(!printer||unsupportedDuplex||driverBlock||!capabilities)?printerNotice:'';
  async function submit(e:FormEvent){
-  e.preventDefault();if(!preview||saving||submitted||!calculation||calculationError||countError||popupOrder&&!active)return;setSaving(true);setPopupError('');
+  e.preventDefault();if(!preview||saving||!calculation||calculationError||countError||popupOrder&&!active)return;setSaving(true);setPopupError('');
   try{
-   if(active&&exportPrinter){await run('savePrintPdf',{id:active.id,...options},'Prepared PDF saved');return}
+   if(active&&pdfOutput){await window.bloom.call('savePrintPdf',{id:active.id,...options});return}
    if(active&&printBlock)throw new Error(printBlock);
    if(active&&unsupportedDuplex)throw new Error('Choose a physical printer and a supported two-sided mode, or save the prepared PDF.');
    if(active){
-     if(attachmentId){
-      await window.bloom.call('print',{id:active.id,...options});
-      setSubmitted(true);
-      await refresh();
-     }else await run('print',{id:active.id,...options},'Added to Print Queue. Confirm completion after printing.');
-     return;
-    }
+    await window.bloom.call('print',{id:active.id,...options});
+    state.set({pdfPrintAttachment:'',view:'Print Queue'});
+    await refresh();
+    return;
+   }
    const id=await window.bloom.call('order',{customer:preview.customer_id,files:[preview.id],copies,paper,colour,price:0,discount:reduction,charge:extra,calculations,printSettings:options});
    if(attachmentId)setPopupOrder(id);
    await refresh();if(!attachmentId)state.set({job:id});
@@ -217,11 +222,10 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  <label>Ink<select value={advanced.ink==='grayscale'?'grayscale':colour?'colour':'mono'} onChange={e=>{const value=e.target.value;setColour(value==='colour');setAdvanced(prior=>({...prior,ink:value==='grayscale'?'grayscale':'legacy'}))}}><option value="mono">Black &amp; white</option><option value="grayscale">Grayscale</option><option value="colour">Colour</option></select></label>
  <label>Orientation<select value={options.orientation} onChange={e=>{setLandscape(e.target.value==='landscape');setAdvanced(prior=>({...prior,orientation:e.target.value as typeof orientation}))}}><option value="portrait">Portrait</option><option value="landscape">Landscape</option><option value="auto" disabled={booklet||advanced.scaling==='printable'}>Auto by first selected page</option></select></label></div>
  {manualPaper==='Custom'&&!matched&&<div className="form-grid">{(['widthMm','heightMm'] as const).map(key=><label key={key}>{key==='widthMm'?'Paper width (mm)':'Paper height (mm)'}<input type="number" min="20" max="2000" value={options.customPaper?.[key]??(key==='widthMm'?210:297)} onChange={e=>setAdvanced(prior=>({...prior,customPaper:{widthMm:210,heightMm:297,...prior.customPaper,[key]:Number(e.target.value)}}))}/></label>)}</div>}
- <label>Printer<PrinterSelect value={printer} change={setPrinter}/></label>{attachmentId&&<div className="actions"><Button className="secondary" disabled={!printer} onClick={()=>void window.bloom.call('printerDialog',{printer,kind:'preferences'}).then(()=>refreshCapabilities(value=>value+1)).catch(error)}>Printer properties</Button></div>}{capabilities&&<small>{capabilities.model||capabilities.name} ? {capabilities.offline?'Offline':capabilities.error>2?'Driver error '+capabilities.error:'Windows status '+capabilities.status}</small>}
+ <label>Printer<PrinterSelect value={printer} change={setPrinter} labelOutput/></label>{attachmentId&&<div className="actions"><Button className="secondary" onClick={refreshPrinters}>Refresh printers</Button><Button className="secondary" disabled={!printer} onClick={()=>void window.bloom.call('printerDialog',{printer,kind:'preferences'}).then(()=>refreshCapabilities(value=>value+1)).catch(error)}>Printer properties</Button></div>}{capabilities&&<small>{capabilities.model||capabilities.name} ? {capabilities.offline?'Offline':capabilities.error>2?'Driver error '+capabilities.error:'Windows status '+capabilities.status}</small>}
  <label>Two-sided printing<select value={duplex} onChange={e=>setDuplex(e.target.value as typeof duplex)}><option value="simplex">One-sided</option><option value="longEdge">Two-sided automatic (long edge)</option><option value="shortEdge">Two-sided automatic (short edge)</option><option value="manualLongEdge">Two-sided manual (long edge)</option><option value="manualShortEdge">Two-sided manual (short edge)</option></select></label>
  {twoSided&&calculation&&<p role="status">{calculation.totalPhysicalSheets} physical sheets / {calculation.printedSides} printed sides</p>}
  {files.some(item=>item.mime==='application/pdf')&&<p>{inkMode==='mixed'?<>Black &amp; white {money(policy.mono)} / Colour {money(policy.colour)}</>:<>{inkMode==='colour'?'Colour':'Black & white'} {money(inkMode==='colour'?policy.colour:policy.mono)}</>} per {pricedBasis==='sheet'?'physical sheet':pricedBasis==='side'?'printed side':pricedBasis==='booklet'?'booklet':'selected page'}</p>}
- {twoSided&&virtualPrinter&&<p role="status">{printBlock}</p>}
  {automaticDuplex&&!virtualPrinter&&unsupportedDuplex&&<p role="status">{capabilities?'This printer does not advertise automatic two-sided printing. Choose a manual two-sided mode.':'Checking printer support for automatic two-sided printing.'}</p>}
  {manualDuplex&&!virtualPrinter&&<p>Print the fronts first. BloomConnect will prompt you to reload the sheets before printing the backs.</p>}
  <label>PDF page range<input value={range} onChange={e=>setRange(e.target.value)} placeholder="All pages, or 1-3, 5"/></label>
@@ -294,12 +298,11 @@ function PdfStudio({attachmentId}:{attachmentId?:string}={}){
  {active&&calculation&&estimatedTotal!==active.total&&<Button className="secondary" disabled={estimatedTotal<active.paid||!!calculationError} onClick={()=>{setQuote(String(estimatedTotal/100));setQuoteReason('Applied current '+policy.basis+' estimate');void run('quote',{id:active.id,total:estimatedTotal,reason:'Operator applied current '+policy.basis+' estimate'},'Order price updated')}}>Apply current estimate to order</Button>}
  <div hidden={mode!=='advanced'}><ProfessionalSettings capabilities={capabilities} refresh={()=>refreshCapabilities(value=>value+1)} settings={{id:active?.id??'preview',...options}} change={applySettings}/></div>
  {active&&<Button className="secondary" disabled={saving||!countsReady||!!calculationError} onClick={()=>void run('savePrintPdf',{id:active.id,...options},'Prepared PDF export finished')}>Save prepared PDF</Button>}
- {printBlock&&<p role="status" id="print-submit-block">{printBlock}</p>}
+ {printerNotice&&<p role="status" id="print-submit-block">{printerNotice}</p>}
  <p className="subtle">Paper and duplex support depend on the Windows driver. Confirm physical completion in Print Queue.</p>
  {popupError&&<p role="alert">{popupError}</p>}
- {attachmentId&&active&&<p role="status">{active.id} · {submitted?'Added to Print Queue. Continue manual duplex or confirm physical completion there.':'Order created. Review the preview and submit when ready.'}</p>}
- {submitted&&<Button className="secondary" onClick={()=>state.set({pdfPrintAttachment:'',view:'Print Queue'})}>Open Print Queue</Button>}
- </div><div className="print-sticky-actions"><div className="total"><span>Live estimate</span><strong>{calculation?money(estimatedTotal):'-'}</strong></div><Button type="submit" aria-describedby={printBlock?'print-submit-block':undefined} disabled={saving||submitted||!!(popupOrder&&!active)||!preview||!countsReady||!!countError||!!calculationError||!!printBlock}><Printer size={17}/>{submitted?'Submitted to Print Queue':saving?'Working...':active?exportPrinter?'Print to PDF':manualDuplex?'Start manual duplex':'Submit print job':attachmentId?'Create order to print':'Create order'}</Button></div>
+ {attachmentId&&active&&<p role="status">{active.id} · Order created. Review the preview and submit when ready.</p>}
+ </div><div className="print-sticky-actions"><div className="total"><span>Live estimate</span><strong>{calculation?money(estimatedTotal):'-'}</strong></div><Button type="submit" aria-describedby={printBlock?'print-submit-block':undefined} disabled={saving||!!(popupOrder&&!active)||!preview||!countsReady||!!countError||!!calculationError||!!printBlock}><Printer size={17}/>{saving?'Working...':active?pdfOutput?'Save as PDF':manualDuplex?'Start manual duplex':'Submit print job':attachmentId?'Create order to print':'Create order'}</Button></div>
  </form></Panel></div>;
 }
 export function Queue({history=false}:{history?:boolean}){

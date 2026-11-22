@@ -1,3 +1,4 @@
+import {isVirtualPrinter} from '../../packages/printing/capabilities';
 import {createContext,useContext,type ReactNode} from 'react';
 import {Inbox} from 'lucide-react';
 import type {Bridge,Snapshot,Printer,Operation,Input} from '../../packages/shared/contracts';
@@ -13,4 +14,4 @@ export const match=(needle:string,...values:(string|null|undefined)[])=>values.s
 export const name=(s:Snapshot,id:string|null)=>s.customers.find(c=>c.id===id)?.name??'Walk-in';
 export function Empty({title,children}:{title:string;children?:ReactNode}){return <div className="empty"><span><Inbox size={22}/></span><strong>{title}</strong>{children}</div>}
 export function Table({headers,children}:{headers:string[];children:ReactNode}){return <div className="table-wrap"><table><thead><tr>{headers.map((h,i)=><th key={i}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>}
-export function PrinterSelect({value,change}:{value:string;change:(value:string)=>void}){const {printers}=useData();return <select aria-label="Printer" value={value} onChange={e=>change(e.target.value)}><option value="">Select a printer</option>{printers.map(p=><option key={p.name} value={p.name}>{p.displayName||p.name}{p.isDefault?' (default)':''}</option>)}</select>}
+export function PrinterSelect({value,change,labelOutput=false}:{value:string;change:(value:string)=>void;labelOutput?:boolean}){const {printers}=useData();return <select aria-label="Printer" value={value} onChange={e=>change(e.target.value)}><option value="">Select a printer</option>{printers.map(p=><option key={p.name} value={p.name}>{p.displayName||p.name}{p.isDefault?' (default)':''}{labelOutput&&isVirtualPrinter(p.name)?' (virtual)':''}</option>)}</select>}

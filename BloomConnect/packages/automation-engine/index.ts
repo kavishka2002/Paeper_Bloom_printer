@@ -452,8 +452,9 @@ run("UPDATE notification_outbox SET status='Unconfirmed',error='Application stop
 run("UPDATE notification_attempts SET result='Unconfirmed',error='Application stopped during sending' WHERE result='Sending'");
 let notificationBusy=false;
 async function deliverNotifications(){
- if(notificationBusy)return;notificationBusy=true;let touched=false;
+ if(shuttingDown||notificationBusy)return;notificationBusy=true;let touched=false;
  try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;attempts:number;event_key:string}>("SELECT * FROM notification_outbox WHERE status='Pending' AND due<=? ORDER BY due LIMIT 10",Date.now())){
+  if(shuttingDown)break;
   touched=true;const [event,jobId]=item.event_key.split(':');if(['pickup','print-completed'].includes(event)&&!allFilesConfirmed(jobId)){run("UPDATE notification_outbox SET status='Cancelled',error='Order files are not all confirmed printed' WHERE id=?",item.id);continue}
   const rule=snapshot().rules.find(r=>r.id===item.rule_id);
   if(!rule?.enabled){run("UPDATE notification_outbox SET status='Cancelled',error='Rule disabled' WHERE id=?",item.id);continue}
@@ -469,7 +470,7 @@ async function deliverNotifications(){
 }
 setInterval(()=>void deliverNotifications().catch(e=>store.audit('Automation queue error',String(e))),1000).unref();
 async function probe(){
-  const current=adapter;if(!current||networkBusy)return;
+  const current=adapter;if(shuttingDown||!current||networkBusy)return;
   networkBusy=true;
   try{const phone=await current.verify();if(adapter===current){connection={...connection,status:'API reachable',phone};
     for(const a of rows<{id:string}>("SELECT id FROM attachments WHERE status='Pending' AND remote IS NOT NULL LIMIT 20"))void receiveMedia(a.id).catch(()=>{});
@@ -657,6 +658,8 @@ const internal:Record<string,(input:never)=>unknown>={
   async saveBackup({path}:{path:string}){await mkdir(join(path,'documents'),{recursive:true});run('VACUUM INTO ?',join(path,'bloomconnect.sqlite'));try{for(const file of await readdir(mediaDir))if(/^[a-f0-9]{64}\./.test(file)&&['pdf','jpg','png','webp','tiff','heic',...officeExtensions].some(ext=>file.endsWith('.'+ext)))await copyFile(join(mediaDir,file),join(path,'documents',file))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}return true}
 };
 process.on('message',async(message:{id:number;operation:string;input:never})=>{
+  if(message.operation==='suspendForLicense'){shutdown();return}
+  if(shuttingDown)return;
   try{
     const operation=message.operation as Operation;
     const handler=Object.hasOwn(internal,operation)?internal[operation]:undefined;
@@ -669,4 +672,15 @@ process.on('message',async(message:{id:number;operation:string;input:never})=>{
 });
 
 if(store.setting('whatsappProvider')==='web')void connectWeb().catch(()=>{});
-process.on('disconnect',()=>{shuttingDown=true;if(webRetry)clearTimeout(webRetry);void (web?.stop()??Promise.resolve()).finally(()=>process.exit(0))});
+function shutdown(){
+  if(shuttingDown)return;
+  shuttingDown=true;
+  if(webRetry)clearTimeout(webRetry);
+  server.close();
+  const connectionToStop=web;
+  web=undefined;
+  adapter=undefined;
+  setTimeout(()=>process.exit(0),5000).unref();
+  void (connectionToStop?.stop()??Promise.resolve()).finally(()=>process.exit(0));
+}
+process.on('disconnect',shutdown);

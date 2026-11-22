@@ -1,0 +1,26 @@
+.license-status-button {
+  position: fixed;
+  z-index: 11;
+  right: 1rem;
+  bottom: 1rem;
+  padding: .45rem .75rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: .6rem;
+  box-shadow: 0 2px 8px #0002;
+}
+.license-status-button:hover { background: var(--soft); }
+.license-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .75rem; }
+.license-countdown { font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.setup > .license-panel { width: min(100%, 650px); }
+.license-heading { display: grid; gap: .45rem; }
+.license-heading h1, .license-heading p { margin: 0; }
+.license-state { font-weight: 650; }
+.license-state[data-active="true"] { color: var(--accent); }
+.license-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .7rem; margin-block: .6rem; }
+.license-facts > div { padding: .7rem; border: 1px solid var(--line); border-radius: .6rem; overflow-wrap: anywhere; }
+.license-facts dt { font-size: .8rem; }
+.license-facts dd { margin: .25rem 0 0; font-weight: 600; }
+.license-form { padding: .8rem; border: 1px solid var(--line); border-radius: .6rem; }

@@ -11,7 +11,7 @@
   --radius:12px; --gap:14px; --speed:180ms;
   color:var(--text); background:var(--bg);
 }
-:root[data-theme="dark"] {
+:root[data-theme="dark"], .setup {
   --bg:#0a1025; --surface:#141e38; --text:#edf3ff; --muted:#b7c4e1; --line:#34466a; --soft:#202d50;
   --accent:#8de9ff; --green:#7de1b9; --focus:#8de9ff; --shadow:0 7px 18px #0002;
   --green-tint:#1a3c38; --warm-tint:#422f26; --warm-text:#ffd096; --chat:#0e1730; --sent:#26284e;
@@ -255,7 +255,9 @@ tbody tr:hover {background:var(--soft)}
 .react-flow__node.node-action,.react-flow__node.node-notification {background:linear-gradient(110deg,#e4f9ef,#b7eed4);border-color:#76c9ac;color:#174f41}
 .react-flow__node.node-delay {background:linear-gradient(110deg,#fff4d9,#ffe1a9);border-color:#e5ad60;color:#704214}
 .reply-preview {padding:10px;background:var(--sent);border-radius:9px;white-space:pre-wrap;overflow-wrap:anywhere}
-.setup {background:radial-gradient(ellipse at 15% 20%,var(--soft),transparent 65%),var(--bg)}
+.setup {min-height:100dvh;color:var(--text);color-scheme:dark;background:radial-gradient(ellipse at 85% 8%,#39265d 0%,transparent 54%),linear-gradient(145deg,#0a1025,#121e3c)}
+.onboarding-card {animation:onboarding-enter 240ms ease-out both}
+@keyframes onboarding-enter {from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 .onboarding-card {width:min(760px,100%);display:grid;grid-template-columns:230px minmax(0,1fr);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
 .onboarding-card>.panel {border-radius:0;padding:23px;display:grid;gap:13px;align-content:center;min-height:355px}
 .onboarding-rail {background:linear-gradient(155deg,#172752,#293e96 68%,#482477);color:white;padding:19px}
@@ -311,6 +313,7 @@ tbody tr:hover {background:var(--soft)}
 .photo-editor-popup .preview-stage {max-height:68vh}
 .photo-editor-popup .preview-stage canvas {max-height:64vh}
 .photo-editor-order {display:grid;gap:6px;max-height:55vh;overflow:auto;padding:2px}
+.photo-order-thumbnail {width:48px;height:42px;float:inline-start;margin-inline-end:8px;overflow:hidden}
 .photo-editor-order-item {padding:7px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
 .scan-workspace {display:grid;grid-template-columns:minmax(220px,270px) minmax(0,1fr);gap:16px;align-items:start;background:var(--surface);color:var(--text)}
 .scan-settings {min-width:0;gap:10px}

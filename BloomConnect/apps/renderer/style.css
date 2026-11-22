@@ -18,4 +18,19 @@ main{max-width:1650px;margin:auto;padding:25px clamp(14px,2.3vw,33px) 36px}.page
 
 .photo-library{display:grid;gap:8px;max-height:65vh;overflow:auto}.photo-library-card{display:grid;grid-template-columns:20px 64px 1fr;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:8px}.photo-library-card .file-thumbnail{width:64px;height:64px;object-fit:contain}.photo-library-card small{display:block}
 
-.photo-studio-workspace>.panel:last-child{max-height:calc(100vh - 160px);overflow:auto;position:sticky;top:8px}.photo-print-actions{position:sticky;bottom:-16px;background:var(--panel,#132c25);padding:12px 0;display:grid;gap:8px;z-index:2}.photo-edit-item{padding:10px 0;border-bottom:1px solid var(--line)}
+.photo-settings-panel{display:grid;gap:10px}.photo-print-actions{display:grid;gap:8px;padding-top:12px;border-top:1px solid var(--line)}.photo-edit-item{padding:10px 0;border-bottom:1px solid var(--line)}
+
+.photo-settings-popup {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.9fr);gap:20px;align-items:start;margin-top:14px}
+.photo-settings-controls {min-width:0;max-height:68vh;overflow:auto;padding-right:12px}
+.photo-settings-controls [hidden] {display:none}
+.photo-settings-controls section+section:not([hidden]) {margin-top:14px}
+.photo-settings-preview {min-width:0;padding:14px;border:1px solid var(--line);border-radius:12px}
+.photo-settings-preview .preview-stage {max-height:49vh}
+.photo-settings-preview .preview-stage canvas {max-height:45vh}
+.photo-layout-example {display:grid;gap:6px;padding:10px;width:min(100%,220px);margin-inline:auto;background:#fff;border:1px solid #c8d1e4;border-radius:4px}
+.photo-layout-example span {display:grid;place-items:center;background:#e8eefc;color:#1c376b;border:1px dashed #879fd0;border-radius:3px}
+.photo-clarity {padding:12px;border:1px solid var(--line);border-radius:10px}
+@media(max-width:640px) {
+ .photo-settings-popup {grid-template-columns:minmax(0,1fr)}
+ .photo-settings-controls {max-height:none;padding-right:0}
+}

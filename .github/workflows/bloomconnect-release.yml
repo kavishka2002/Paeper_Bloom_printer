@@ -40,6 +40,22 @@ jobs:
       - run: npm test
       - run: npx --no-install electron-builder --win nsis --x64 --publish never
 
+      - name: Verify packaged app starts
+        shell: pwsh
+        run: |
+          $env:BLOOMCONNECT_SMOKE_DIR = Join-Path $env:RUNNER_TEMP 'bloomconnect-package-smoke'
+          $env:BLOOMCONNECT_SMOKE_QUICK_PDF = '1'
+          $app = Start-Process -FilePath './release/win-unpacked/BloomConnect.exe' -WindowStyle Hidden -PassThru
+          if (!$app.WaitForExit(180000)) {
+            Stop-Process -Id $app.Id
+            throw "Packaged BloomConnect startup timed out."
+          }
+          $errorLog = Join-Path $env:BLOOMCONNECT_SMOKE_DIR 'smoke-error.txt'
+          if (Test-Path -LiteralPath $errorLog) { Get-Content -LiteralPath $errorLog }
+          if ($app.ExitCode -ne 0) { throw "Packaged BloomConnect exited with code $($app.ExitCode)." }
+          $result = Get-Content -Raw (Join-Path $env:BLOOMCONNECT_SMOKE_DIR 'smoke.json') | ConvertFrom-Json
+          if (!$result.setup -or !$result.pdfPreview) { throw "Packaged setup or PDF preview failed." }
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:

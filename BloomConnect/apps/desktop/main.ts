@@ -1,21 +1,27 @@
 import {mkdirSync} from 'node:fs';
 import {queryCapabilities,validatePrinter,openPrinterDialog,windowsBridge} from '../../packages/printing/windows';
-import {isVirtualPrinter} from '../../packages/printing/capabilities';
+import {isFileOutputPrinter,isPdfPrinter,isVirtualPrinter} from '../../packages/printing/capabilities';
 import {normalizedSettings,type ManualFeedProfile} from '../../packages/printing/settings';
 import {paperDimensions} from '../../packages/printing/paper';
 import {paperSizes} from '../../packages/printing/calculation';
 import {app,BrowserWindow,clipboard,dialog,ipcMain,safeStorage,session,protocol,net,shell} from 'electron';
-import {performSupportAction} from '../../packages/shared/support';
+import {openLicensePurchase,performSupportAction} from '../../packages/shared/support';
 import {fork,type ChildProcess} from 'node:child_process';
 import {join,isAbsolute} from 'node:path';
-import {mkdir,mkdtemp,readFile,rename,rm,unlink,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,open,readFile,rename,rm,unlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {schemas,type Operation,type Input,type Payment} from '../../packages/shared/contracts';
+import {openOfflineLicense} from './offline-license';
+import {WEBSITE_LICENSE_LIMIT as LIMIT} from '../../packages/licensing/website-license';
 let main:BrowserWindow;
 let startupSplash:BrowserWindow|undefined;
-let child:ChildProcess;
+let child:ChildProcess|undefined;
+let licensing:ReturnType<typeof openOfflineLicense>;
+let licenseMonitor:NodeJS.Timeout;
+let suspendingEngine=false;
+let engineRetryAfter=0;
 let root:string;
 let stopping=false;
 let sequence=0;
@@ -27,14 +33,17 @@ protocol.registerSchemesAsPrivileged([{scheme:'bloom',privileges:{standard:true,
 const vault=()=>join(root,'credentials.dpapi');
 function engine<T=unknown>(operation:string,input:unknown):Promise<T>{
   return new Promise((resolve,reject)=>{
-    if(!child?.connected){reject(new Error('The background engine is restarting.'));return}
+    if(operation!=='printFinish')requireLicense();
+    const worker=child;
+    if(!worker?.connected||suspendingEngine){reject(new Error('The background engine is restarting.'));return}
     const id=++sequence;
     const timeout=setTimeout(()=>{awaiting.delete(id);reject(new Error('The engine took too long. Check the current status before retrying.'))},120000);
     awaiting.set(id,{resolve:value=>resolve(value as T),reject,timeout});
-    child.send({id,operation,input},error=>{if(error){clearTimeout(timeout);awaiting.delete(id);reject(new Error('The engine is unavailable.'))}});
+    worker.send({id,operation,input},error=>{if(error){clearTimeout(timeout);awaiting.delete(id);reject(new Error('The engine is unavailable.'))}});
   });
 }
 function startEngine(){
+  if(stopping||child||performance.now()<engineRetryAfter||!licensing.status().allowed)return;
   const processChild=fork(join(__dirname,'engine.cjs'),[root],{env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},serialization:'advanced',stdio:['ignore','ignore','ignore','ipc']});child=processChild;
   processChild.on('message',(msg:{id:number;type?:string;error?:string;result?:unknown})=>{
     if(msg.type==='changed'){if(main&&!main.isDestroyed())main.webContents.send('bloom:changed');return}
@@ -42,15 +51,38 @@ function startEngine(){
     clearTimeout(pending.timeout);awaiting.delete(msg.id);
     if(msg.error)pending.reject(new Error(msg.error));else pending.resolve(msg.result);
   });
-  processChild.on('error',()=>{});
-  processChild.on('exit',()=>{for(const pending of awaiting.values()){clearTimeout(pending.timeout);pending.reject(new Error('The engine restarted. Check current status before retrying.'))}awaiting.clear();
-    if(!stopping)setTimeout(()=>{startEngine();void restore()},2500);
-  });
+  const stopped=()=>{child=undefined;for(const pending of awaiting.values()){clearTimeout(pending.timeout);pending.reject(new Error('The engine restarted. Check current status before retrying.'))}awaiting.clear();
+    const paused=suspendingEngine;
+    suspendingEngine=false;
+    if(stopping)return;
+    if(paused)syncLicensedEngine();
+    else{
+      engineRetryAfter=performance.now()+2500;
+      setTimeout(syncLicensedEngine,2500).unref();
+    }
+  };
+  processChild.once('exit',stopped);
+  processChild.on('error',()=>{if(!processChild.pid&&child===processChild)stopped()});
+  void restore();
+}
+function syncLicensedEngine(){
+  const status=licensing.status();
+  if(status.allowed)startEngine();
+  else if(child?.connected&&!suspendingEngine){
+    const worker=child;
+    suspendingEngine=true;
+    worker.send({operation:'suspendForLicense'},error=>{if(error&&worker.connected)worker.disconnect()});
+  }
+  return status;
+}
+function requireLicense(){
+  if(!syncLicensedEngine().allowed)throw new Error('A valid BloomConnect license is required.');
 }
 async function restore(){
   try{if(safeStorage.isEncryptionAvailable()){const input=JSON.parse(safeStorage.decryptString(await readFile(vault())));await engine('restoreConnection',input)}}catch{ /* Missing or unavailable credentials require operator setup. */ }
 }
 const windowOptions={icon:join(__dirname,'ui','bloomconnect-logo.png'),webPreferences:{preload:join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}};
+const printWindowOptions={...windowOptions,show:false,paintWhenInitiallyHidden:true,webPreferences:{...windowOptions.webPreferences,backgroundThrottling:false}};
 function lock(win:BrowserWindow){win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',event=>event.preventDefault())}
 function startWorkspaceWindow(window:BrowserWindow,visible:boolean,verify:boolean){
   if(!visible&&!verify)return;
@@ -76,7 +108,12 @@ function startWorkspaceWindow(window:BrowserWindow,visible:boolean,verify:boolea
   const splashReady=splash.loadURL(startupUrl).then(async()=>{
     if(splash.isDestroyed())return false;
     if(visible){splash.show();shownAt=Date.now()}
-    if(verify&&!await splash.webContents.executeJavaScript("document.querySelector('.brand img')?.naturalWidth>0"))return false;
+    if(verify&&!await splash.webContents.executeJavaScript(`(() => {
+      const bar=document.getElementById('progress');
+      return document.querySelector('.brand img')?.naturalWidth>0
+        && document.body.getBoundingClientRect().height===innerHeight
+        && getComputedStyle(bar).backgroundColor==='rgb(44, 59, 100)';
+    })()`))return false;
     return update(stage.value,stage.label);
   }).catch(()=>false);
   let resolveDone:(value:{loaded:boolean;completed:boolean;reason:string;mainWasHidden:boolean})=>void;
@@ -119,14 +156,16 @@ async function printOrder(input:Input<'print'>){
   if(!list.some(p=>p.name===input.printer))throw new Error('Select an available Windows printer.');
   const verified=normalizedSettings(input);
   const capabilities=await queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified);
+  if(isPdfPrinter(input.printer,capabilities.driver))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
+  const fileOutput=isFileOutputPrinter(capabilities.port);
+  const virtual=isVirtualPrinter(input.printer)||isVirtualPrinter(capabilities.driver)||fileOutput;
+  if(virtual&&(verified.duplex!=='simplex'||verified.tray!==undefined||verified.driverDpi))throw new Error('Duplex, explicit trays and driver resolution require a physical printer.');
   validatePrinter(verified,capabilities);
-  if(verified.duplex!=='simplex'&&isVirtualPrinter(capabilities.driver))throw new Error('Two-sided printing requires a physical printer.');
   if(Object.keys(verified.photoItems).length){
     const margins=verified.margins??{left:verified.marginMm,right:verified.marginMm,top:verified.marginMm,bottom:verified.marginMm};
     for(const edge of ['left','right','top','bottom'] as const)if(Math.max(margins[edge],verified.printable?.[edge]??0)+.1<capabilities.printable[edge])throw new Error('Photo layout exceeds this printer printable area. Refresh the printer selection and review the new layout before printing.');
   }
   const native=verified.tray!==undefined||!!verified.driverDpi;
-  if(native&&isVirtualPrinter(capabilities.driver))throw new Error('Use a physical printer for explicit tray or resolution settings.');
   const files=await selectedPrintFiles(input);
   if(!files.length)throw new Error('This order has no files.');
   if(input.booklet&&(input.nup!==2||input.duplex==='simplex'||!input.landscape))throw new Error('Booklets require landscape paper, two pages per side and duplex.');
@@ -139,7 +178,7 @@ async function printOrder(input:Input<'print'>){
   let attempted=false;
   let secondAttempted=false;
   async function submitPass(pass:Input<'print'>,reverse=false,rotate=false,secondPass=false){
-    const win=new BrowserWindow({...windowOptions,show:false,paintWhenInitiallyHidden:true});
+    const win=new BrowserWindow(printWindowOptions);
     lock(win);
     const viewId=win.webContents.id;
     try{
@@ -179,6 +218,7 @@ async function printOrder(input:Input<'print'>){
           }
           attempted=true;
           if(secondPass)secondAttempted=true;
+          requireLicense();
           const result=await windowsBridge(join(__dirname,'windows.ps1'),'submit',{printer:input.printer,widthMm:width,heightMm:height,landscape,colour,duplex:duplexMode,tray:verified.tray,dpi:verified.driverDpi,title:input.id,pages});
           if(!result?.submitted||result.pages!==pages.length)throw new Error('Windows did not confirm all prepared sides.');
         }finally{await rm(folder,{recursive:true,force:true})}
@@ -186,7 +226,8 @@ async function printOrder(input:Input<'print'>){
       }
       attempted=true;
       if(secondPass)secondAttempted=true;
-      await new Promise<void>((resolve,reject)=>win.webContents.print({silent:true,deviceName:input.printer,landscape,color:colour,copies:1,collate:false,duplexMode,pageSize,margins:{marginType:'none'},printBackground:true},(success,reason)=>success?resolve():reject(new Error(reason||'Windows did not confirm submission.'))));
+      requireLicense();
+      await new Promise<void>((resolve,reject)=>win.webContents.print({silent:!fileOutput,deviceName:input.printer,landscape,color:colour,copies:1,collate:false,duplexMode,pageSize,margins:{marginType:'none'},printBackground:true},(success,reason)=>success?resolve():reject(new Error(reason||'Windows did not confirm submission.'))));
     }finally{printViews.delete(viewId);if(!win.isDestroyed())win.destroy()}
   }
   try{
@@ -209,10 +250,11 @@ async function printOrder(input:Input<'print'>){
   return {entry};
 }
 async function savePreparedPdf(input:Input<'savePrintPdf'>){
-  const selected=await dialog.showSaveDialog(main,{defaultPath:input.id+'-prepared.pdf',filters:[{name:'PDF',extensions:['pdf']}]});
-  if(!selected.filePath)return false;
   const files=await selectedPrintFiles(input);
-  const win=new BrowserWindow({...windowOptions,show:false,paintWhenInitiallyHidden:true});lock(win);
+  if(!files.length)throw new Error('This order has no files.');
+  const selected=await dialog.showSaveDialog(main,{defaultPath:input.id+'-prepared.pdf',filters:[{name:'PDF',extensions:['pdf']}]});
+  if(selected.canceled||!selected.filePath)return false;
+  const win=new BrowserWindow(printWindowOptions);lock(win);
   try{
     const rendered=new Promise<void>((resolve,reject)=>{
       const timer=setTimeout(()=>reject(new Error('PDF preparation timed out.')),90000);
@@ -230,6 +272,7 @@ else void app.whenReady().then(async()=>{
   app.setName('BloomConnect');
   if(process.platform==='win32')app.setAppUserModelId('lk.bloomconnect.desktop');
   root=app.getPath('userData');await mkdir(root,{recursive:true});
+  licensing=openOfflineLicense(root);
   protocol.handle('bloom',request=>{
     const url=new URL(request.url);
     if(request.method!=='GET'||url.host!=='workspace'||!/^\/(?:index\.html|startup\.(?:html|css)|bloomconnect-logo\.png|assets\/(?:pdfjs\/(?:cmaps|standard_fonts|wasm|iccs)\/)?[\w-]+(?:\.[\w-]+)*)$/.test(url.pathname))return new Response('Not found',{status:404});
@@ -237,9 +280,44 @@ else void app.whenReady().then(async()=>{
   });
   session.defaultSession.setPermissionRequestHandler((_web,_permission,callback)=>callback(false));
   session.defaultSession.setPermissionCheckHandler(()=>false);
-  startEngine();void restore();
+  syncLicensedEngine();
+  licenseMonitor=setInterval(syncLicensedEngine,1000);
+  licenseMonitor.unref();
   main=new BrowserWindow({...windowOptions,webPreferences:{...windowOptions.webPreferences,backgroundThrottling:process.env.BLOOMCONNECT_SMOKE_VISUAL!=='1'&&process.env.BLOOMCONNECT_SMOKE_PRINT!=='1'},width:1450,height:950,minWidth:1000,minHeight:700,backgroundColor:'#0a1028',show:false,paintWhenInitiallyHidden:true,title:'BloomConnect',autoHideMenuBar:true});
   lock(main);
+  ipcMain.handle('bloom:license',async(event,action:unknown,value:unknown)=>{
+    if(!trusted(event))throw new Error('Unauthorized license request.');
+    if(action==='status')return syncLicensedEngine();
+    if(action==='copy'){clipboard.writeText(licensing.status().deviceId);return}
+    if(action==='paste'){
+      const text=clipboard.readText();
+      if(text.length>LIMIT)throw new Error('The clipboard text exceeds the license size limit.');
+      return text.trim();
+    }
+    if(action==='support')return performSupportAction('whatsapp',url=>shell.openExternal(url),value=>clipboard.writeText(value));
+    if(action==='buy')return openLicensePurchase(licensing.status().deviceId,url=>shell.openExternal(url));
+    let code:string;
+    if(action==='import'){
+      const selected=await dialog.showOpenDialog(main,{properties:['openFile'],filters:[{name:'BloomConnect license',extensions:['bclicense','txt']}]});
+      if(selected.canceled)return null;
+      const file=await open(selected.filePaths[0],'r');
+      try{
+        const buffer=Buffer.alloc(LIMIT+1);
+        let size=0;
+        while(size<=LIMIT){
+          const {bytesRead}=await file.read(buffer,size,buffer.length-size);
+          if(!bytesRead)break;
+          size+=bytesRead;
+        }
+        if(size>LIMIT)throw new Error('Invalid license file size.');
+        code=new TextDecoder('utf-8',{fatal:true}).decode(buffer.subarray(0,size));
+      }finally{await file.close()}
+    }else if(action==='activate'&&typeof value==='string'&&value.length<=LIMIT)code=value;
+    else throw new Error('Invalid license request.');
+    const result=licensing.activate(code);
+    syncLicensedEngine();
+    return result;
+  });
   const startup=startWorkspaceWindow(main,!process.env.BLOOMCONNECT_SMOKE_DIR,process.env.BLOOMCONNECT_SMOKE_STARTUP==='1');
   ipcMain.handle('bloom:startup-ready',event=>{if(trusted(event))void startup?.finish('ready')});
   ipcMain.handle('bloom:drop-files',async(event,paths:unknown,customer:unknown)=>{if(!trusted(event))throw new Error('Untrusted import request.');const owner=schemas.import.parse({customer});if(!Array.isArray(paths)||!paths.length||paths.length>40||paths.some(path=>typeof path!=='string'||path.length>4096||!isAbsolute(path)))throw new Error('Drop between 1 and 40 local files.');return engine('importLocal',{paths,customer:owner.customer})});
@@ -255,6 +333,7 @@ else void app.whenReady().then(async()=>{
       throw new Error('Unauthorized request.');
     }
     const input=schemas[op].parse(data);
+    requireLicense();
     switch(op){
       case 'appInfo':return {version:app.getVersion()};
       case 'supportAction':return performSupportAction(schemas.supportAction.parse(input).action,url=>shell.openExternal(url),value=>clipboard.writeText(value));
@@ -401,6 +480,11 @@ else void app.whenReady().then(async()=>{
           if(!submit.form.checkValidity())throw Error([...submit.form.querySelectorAll(':invalid')].map(el=>el.closest('label')?.innerText+' '+el.validationMessage).join(' | '));
           submit.click();
           await wait(()=>popup.innerText.includes('Order created.'),'order confirmation');
+          const printer=popup.querySelector('select[aria-label="Printer"]');
+          const devices=await window.bloom.call('printers',null);
+          if(!devices.every(device=>[...printer.options].some(option=>option.value===device.name)))throw Error('Windows printer missing from the list');
+          if(printer.options.length===1&&!submit.disabled)throw Error('Print enabled with no Windows printers installed');
+          if(![...popup.querySelectorAll('button')].some(item=>item.textContent.trim()==='Save prepared PDF'))throw Error('Explicit PDF export is missing');
           popup.querySelector('button[aria-label="Close details"]').click();
           await wait(()=>!popup.isConnected,'popup close');
         }
@@ -508,7 +592,7 @@ else void app.whenReady().then(async()=>{
         await writeFile(join(root,'advanced-studio-booklet.png'),(await main.capturePage()).toPNG());
         main.webContents.debugger.detach();
         const options=schemas.print.parse({id:result.id,printer:'Smoke only - no submission',paper:'A4',copies:1,colour:false,landscape:true,duplex:'shortEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:true,binding:'left',marginMm:5,gapMm:2,borders:true});
-        const printWindow=new BrowserWindow({...windowOptions,show:false,paintWhenInitiallyHidden:true});lock(printWindow);
+        const printWindow=new BrowserWindow(printWindowOptions);lock(printWindow);
         try{
           const prepared=new Promise<void>((resolve,reject)=>{
             const timer=setTimeout(()=>reject(new Error('Advanced print preparation timed out.')),60000);
@@ -561,7 +645,7 @@ else void app.whenReady().then(async()=>{
           await wait(()=>!canvas.hidden&&document.body.innerText.includes('Sheet 1 / 4 (Back)'));
           return {first,summary,landscapeGridVerified:true,fullPageDuplexVerified:true};
         })()`);
-        const win=new BrowserWindow({...windowOptions,show:false,paintWhenInitiallyHidden:true});lock(win);
+        const win=new BrowserWindow(printWindowOptions);lock(win);
         try{
           const prepared=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Photo preparation timeout')),60000);printViews.set(win.webContents.id,{data:{input:{id,...settings},files:photos},ready:error=>{clearTimeout(timer);error?reject(new Error(error)):resolve()}})});
           await Promise.all([win.loadURL(index+'?print=1'),prepared]);
@@ -670,4 +754,4 @@ else void app.whenReady().then(async()=>{
 });
 app.on('second-instance',()=>{if(startupSplash&&!startupSplash.isDestroyed()&&startupSplash.isVisible()){startupSplash.focus();return}if(main&&!main.isDestroyed()){if(main.isMinimized())main.restore();main.focus()}});
 app.on('window-all-closed',()=>app.quit());
-app.on('before-quit',()=>{stopping=true;if(child?.connected)child.disconnect()});
+app.on('before-quit',()=>{stopping=true;clearInterval(licenseMonitor);licensing?.flush();if(child?.connected)child.disconnect()});

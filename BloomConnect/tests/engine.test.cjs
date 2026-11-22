@@ -31,6 +31,11 @@ function start(root,fixture=false){
   const timer=setTimeout(()=>{child.off('message',handler);reject(new Error('engine timeout: '+operation))},7000);
   const handler=response=>{if(response.id!==id)return;clearTimeout(timer);child.off('message',handler);if(response.error)reject(new Error(response.error));else resolve(response.result)};
   child.on('message',handler);child.send({id,operation,input});
+ })},suspendForLicense(){return new Promise((resolve,reject)=>{
+  const timer=setTimeout(()=>{child.off('exit',exited);reject(new Error('engine did not stop after expiry'))},7000);
+  const exited=code=>{clearTimeout(timer);if(code===0)resolve();else reject(new Error('engine failed during license shutdown'))};
+  child.once('exit',exited);
+  child.send({operation:'suspendForLicense'});
  })},stop(){return new Promise(resolve=>{if(child.exitCode!==null||child.signalCode!==null){resolve();return}child.once('exit',resolve);child.kill()})}};
 }
 test('engine validates inputs, imports and deduplicates, persists billing and creates a backup',async()=>{
@@ -69,7 +74,7 @@ test('engine validates inputs, imports and deduplicates, persists billing and cr
   const validated=spawnSync(process.execPath,['scripts/validate-backup.cjs',join(root,'backup')],{encoding:'utf8'});
   assert.equal(validated.status,0,validated.stderr);
   assert.match(validated.stdout,/Backup validated/);
-  await engine.stop();
+  await engine.suspendForLicense();
   engine=start(root);
   const after=await engine.call('snapshot',null);
   assert.equal(after.settings.shop,settings.shop);

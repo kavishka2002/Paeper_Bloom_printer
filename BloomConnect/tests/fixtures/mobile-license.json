@@ -1,0 +1,25 @@
+{
+  "source": "Mobile generator shared/license.ts createSigningKey, createPayload and signLicense (Web Crypto); disposable test key",
+  "publicKey": {
+    "key_ops": [
+      "verify"
+    ],
+    "ext": true,
+    "kty": "EC",
+    "x": "A4XNZ_NO_CrANeXBl5rebCYn0vDw_0FAAGBPSFMaXBU",
+    "y": "wXJ2lFlqrgF3y52BWDyqOf7OmdhhLIzJ0xmtkAqAEq0",
+    "crv": "P-256"
+  },
+  "payload": {
+    "v": 1,
+    "id": "-_YKPMi30I6ZQ1PB7wuBMg",
+    "customer": "Website test ? ????????",
+    "phone": "",
+    "device": "BC1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "product": "BloomConnect",
+    "issued": 1795219200000,
+    "expires": 1797811200000
+  },
+  "license": "BC1.eyJ2IjoxLCJpZCI6Ii1fWUtQTWkzMEk2WlExUEI3d3VCTWciLCJjdXN0b21lciI6IldlYnNpdGUgdGVzdCA_ID8_Pz8_Pz8_IiwicGhvbmUiOiIiLCJkZXZpY2UiOiJCQzEtQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInByb2R1Y3QiOiJCbG9vbUNvbm5lY3QiLCJpc3N1ZWQiOjE3OTUyMTkyMDAwMDAsImV4cGlyZXMiOjE3OTc4MTEyMDAwMDB9.OLEWuBb_pZitpgHh_agobjFkY5Ti7Mp2-63yKe4IQrKcEs1XdFhICSCIYFoGrAHbrnJ-p5bppLVkt0v4quotSQ",
+  "renewal": "BC1.eyJ2IjoxLCJpZCI6IjhsenpMLWw4RjduT2lkd3MteGd3LXciLCJjdXN0b21lciI6IldlYnNpdGUgdGVzdCA_ID8_Pz8_Pz8_IiwicGhvbmUiOiIiLCJkZXZpY2UiOiJCQzEtQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInByb2R1Y3QiOiJCbG9vbUNvbm5lY3QiLCJpc3N1ZWQiOjE3OTUzMDU2MDAwMDAsImV4cGlyZXMiOjE4MDA0ODk2MDAwMDB9.ji8PbZrAYmYSmqa7vYUIXkpuYnaODF5xrYoyWZ3jTKbZ2zpU15SO6vkTvuLdxP_hpAwUHCkRy6XBohuP8HpBeg"
+}

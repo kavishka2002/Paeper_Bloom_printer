@@ -12,11 +12,12 @@ if($request.widthMm -and $request.heightMm){
   $match=$settings.PaperSizes | Where-Object { [Math]::Abs($_.Width*0.254-$request.widthMm) -lt 1.1 -and [Math]::Abs($_.Height*0.254-$request.heightMm) -lt 1.1 } | Select-Object -First 1
   if($match){$page.PaperSize=$match}
   elseif($request.allowCustom){$page.PaperSize=[System.Drawing.Printing.PaperSize]::new('BloomConnect custom',[int][Math]::Round($request.widthMm/0.254),[int][Math]::Round($request.heightMm/0.254))}
-  else{throw 'The Windows driver does not advertise the requested paper size.'}
+  elseif($Action -eq 'submit'){throw 'The Windows driver does not advertise the requested paper size.'}
 }
 $page.Landscape=[bool]$request.landscape
 if($Action -eq 'capabilities'){
-  $device=Get-CimInstance -ClassName Win32_Printer | Where-Object {$_.Name -eq $request.printer} | Select-Object -First 1
+  $printerName=$settings.PrinterName.Replace('\','\\').Replace("'","\'")
+  $device=Get-CimInstance -ClassName Win32_Printer -Filter "Name = '$printerName'" | Select-Object -First 1
   $area=$page.PrintableArea
   $size=$page.Bounds
   $left=[Math]::Max(0,$area.X*0.254);$top=[Math]::Max(0,$area.Y*0.254)
