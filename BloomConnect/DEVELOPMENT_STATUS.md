@@ -123,3 +123,11 @@ Implemented inside the existing Electron application: a customer photo library a
 Extended existing automation with editable Sinhala/English stage templates, persistent acknowledgement batching, original-account checks, bounded offline/media retries, message/attempt logs, and all-file print-confirmation coverage. Database migrations are additive; production data was not used for tests.
 
 Read PRINT_SETTINGS_IMPLEMENTATION.md for capability limits. Driver defaults, physical output and live WhatsApp delivery are not asserted from fixture tests. Final build/test/packaging evidence is recorded in TEST_RESULTS.md.
+## 0.4.2 Windows packaging and updates
+
+The Windows x64 installer is built with `npm run installer` and written to `release`. Upgrades use the existing application ID and retain the BloomConnect workspace.
+
+For an update-enabled installer, set `BLOOMCONNECT_UPDATE_URL` to the production HTTPS directory before building. Host the generated installer, blockmap and `latest.yml` together at that URL. Publish the installer and blockmap before replacing `latest.yml`. Increment the package version for each new update and keep the update channel and signing publisher consistent. Set the standard electron-builder signing credentials for a signed release.
+
+Settings → About BloomConnect shows the update status. Channel-enabled builds check and download updates in the background. Downloaded updates install when the operator closes the app or chooses Restart and install. An active print operation prevents the update from installing. Installations built without a channel display that status and can be upgraded with a new installer.
+

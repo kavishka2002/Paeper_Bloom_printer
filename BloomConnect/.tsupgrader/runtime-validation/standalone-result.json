@@ -1,0 +1,123 @@
+{
+  "planHash": "fcc659c415655406ef9bf06868973b8db65fed53e4a40e81d980584d0a06dc7e",
+  "phase": "standalone",
+  "recordedAtUtc": "2026-11-23T19:05:58.3803845Z",
+  "retryCount": 3,
+  "resetBaseline": false,
+  "complete": true,
+  "result": {
+    "setupSucceeded": true,
+    "setupDurationMs": 0,
+    "setupFailureOutput": null,
+    "assertions": [
+      {
+        "name": "typescript-no-emit",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "",
+        "durationMs": 16369
+      },
+      {
+        "name": "electron-builds",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E bloomconnect@0.4.2 build\r\n\u003E tsc --noEmit \u0026\u0026 vite build \u0026\u0026 node scripts/build.cjs\r\n\r\n\u001B[36mvite v7.3.8 \u001B[32mbuilding client environment for production...\u001B[36m\u001B[39m\r\ntransforming...\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/QueryClientProvider.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/QueryClientProvider.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/HydrationBoundary.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/HydrationBoundary.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/IsRestoringProvider.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/IsRestoringProvider.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useQueries.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useQueries.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/QueryErrorResetBoundary.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/QueryErrorResetBoundary.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useQuery.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useQuery.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useIsFetching.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useIsFetching.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useMutationState.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useMutationState.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useMutation.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useMutation.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useInfiniteQuery.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useInfiniteQuery.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useSuspenseInfiniteQuery.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useSuspenseInfiniteQuery.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useSuspenseQuery.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useSuspenseQuery.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useSuspenseQueries.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useSuspenseQueries.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/errorBoundaryUtils.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/errorBoundaryUtils.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@tanstack/react-query/build/modern/useBaseQuery.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@tanstack/react-query/build/modern/useBaseQuery.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/@xyflow/react/dist/esm/index.js (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/@xyflow/react/dist/esm/index.js\u0022 was ignored.\u001B[39m\r\n\u001B[33mnode_modules/framer-motion/dist/es/components/AnimatePresence/PopChild.mjs (1:0): Module level directives cause errors when bundled, \u0022use client\u0022 in \u0022node_modules/framer-motion/\n\u2026[truncated]",
+        "durationMs": 28430
+      },
+      {
+        "name": "tests-pass",
+        "kind": "process",
+        "verificationMethod": "test-results",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E bloomconnect@0.4.2 test\r\n\u003E node --test tests/*.test.cjs\r\n\r\nTAP version 13\r\n# Subtest: updates auto-download, report progress and guard restart while printing\r\nok 1 - updates auto-download, report progress and guard restart while printing\r\n  ---\r\n  duration_ms: 9.0795\r\n  ...\r\n# Subtest: installations without an update channel remain usable offline\r\nok 2 - installations without an update channel remain usable offline\r\n  ---\r\n  duration_ms: 1.9293\r\n  ...\r\n# Subtest: A3 and Legal rates price each file and duplex sheet independently\r\nok 3 - A3 and Legal rates price each file and duplex sheet independently\r\n  ---\r\n  duration_ms: 15.1597\r\n  ...\r\n# Subtest: A4 supports separate and shared rates per physical sheet\r\nok 4 - A4 supports separate and shared rates per physical sheet\r\n  ---\r\n  duration_ms: 6.0876\r\n  ...\r\n# Subtest: presentation handouts use independent physical-sheet counts for six-up and eight-up duplex\r\nok 5 - presentation handouts use independent physical-sheet counts for six-up and eight-up duplex\r\n  ---\r\n  duration_ms: 0.7941\r\n  ...\r\n# Subtest: booklet signatures impose and pad independently\r\nok 6 - booklet signatures impose and pad independently\r\n  ---\r\n  duration_ms: 2.1409\r\n  ...\r\n# Subtest: 10-page simplex\r\nok 7 - 10-page simplex\r\n  ---\r\n  duration_ms: 0.701\r\n  ...\r\n# Subtest: 10-page duplex\r\nok 8 - 10-page duplex\r\n  ---\r\n  duration_ms: 0.388\r\n  ...\r\n# Subtest: 10-page 4-up\r\nok 9 - 10-page 4-up\r\n  ---\r\n  duration_ms: 0.2387\r\n  ...\r\n# Subtest: 10-page 2-up duplex\r\nok 10 - 10-page 2-up duplex\r\n  ---\r\n  duration_ms: 0.2373\r\n  ...\r\n# Subtest: 10-page 6-up\r\nok 11 - 10-page 6-up\r\n  ---\r\n  duration_ms: 0.5298\r\n  ...\r\n# Subtest: three copies\r\nok 12 - three copies\r\n  ---\r\n  duration_ms: 0.6505\r\n  ...\r\n# Subtest: 8-up duplex\r\nok 13 - 8-up duplex\r\n  ---\r\n  duration_ms: 0.2858\r\n  ...\r\n# Subtest: 9-up\r\nok 14 - 9-up\r\n  ---\r\n  duration_ms: 0.1884\r\n  ...\r\n# Subtest: 16-up\r\nok 15 - 16-up\r\n  ---\r\n  duration_ms: 0.1793\r\n  ...\r\n# Subtest: duplex charges the configured rate per physical sheet\r\nok 16 - duplex charges the configured rate per physical sheet\r\n  ---\r\n  duration_ms: 0.5406\r\n  ...\r\n# Subtest: poster tiles drive sheet and paper cost while preserving the source page count\r\nok 17 - poster tiles drive sheet and paper cost while preserving the source page count\r\n  ---\r\n  duration_ms: 2.1255\r\n  ...\r\n# Subtest: range, odd/even and reverse operate on actual page numbers\r\nok 18 - range, odd/even and reverse operate on actual page numbers\r\n  ---\r\n  duration_ms: 1.9942\r\n  ...\r\n# Subtest: duplex padding distinguishes whole blank sides and empty slots\r\nok 19 - duplex padding distinguishes whole blank sides and empty slots\r\n  ---\r\n  duration_ms: 0.5271\r\n  ...\r\n# Subtest: booklet eight-page left binding has exact front and back order\r\nok 20 - booklet eight-page left binding has exact front and back order\r\n  ---\r\n  duration_ms: 0.4107\r\n  ...\r\n# Subtest: booklet ten pages pads to twelve, right binding mirrors each side\r\nok 21 - booklet ten pages pads to twelve, right binding mirrors each side\r\n  ---\r\n  duration_ms: 12.8645\r\n  ...\r\n# Subtest: manual duplex has explicit two-pass accounting\r\nok 22 - manual duplex has explicit two-pass accounting\r\n  ---\r\n  duration_ms: 0.4104\r\n  ...\r\n# Subtest: mixed colour is charged by imposed side, sheet, or logical page\r\nok 23 - mixed colour is charged by imposed side, sheet, or logical page\r\n  ---\r\n  duration_ms: 0.712\r\n  ...\r\n# Subtest: uncertain selected colour results require confirmation or explicit policy\r\nok 24 - uncertain selected colour results require confirmation or explicit policy\r\n  ---\r\n  duration_ms: 0.6209\r\n  ...\r\n# Subtest: paper formats do not silently change the pricing policy\r\nok 25 - paper formats do not silently change the pricing policy\r\n  ---\r\n  duration_ms: 1.6567\r\n  ...\r\n# Subtest: tier prices, setup, finishing, discount and minimum use integer minor units\r\nok 26 - tier prices, setup, finishing, discount and minimum use integer minor units\r\n  ---\r\n  duration_ms: 4.7599\r\n  ...\r\n# Subtest: price override requires recorded reason\r\nok 27 - price override requires recorded reason\n\u2026[truncated]",
+        "durationMs": 52467,
+        "testResults": {
+          "testFramework": "unknown",
+          "runnerDetectedFrom": "none",
+          "testsTotal": 0,
+          "testsPassed": 0,
+          "testsFailed": 0,
+          "testsSkipped": 0,
+          "parseFailed": true
+        }
+      },
+      {
+        "name": "electron-smoke-startup",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n",
+        "durationMs": 15010
+      }
+    ],
+    "executions": [
+      {
+        "source": "typescript-no-emit",
+        "resolvedExecutable": "C:\\nvm4w\\nodejs\\npx.CMD",
+        "args": [
+          "tsc",
+          "--noEmit"
+        ],
+        "cwd": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "electron-builds",
+        "resolvedExecutable": "C:\\nvm4w\\nodejs\\npm.CMD",
+        "args": [
+          "run",
+          "build"
+        ],
+        "cwd": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "tests-pass",
+        "resolvedExecutable": "C:\\nvm4w\\nodejs\\npm.CMD",
+        "args": [
+          "test"
+        ],
+        "cwd": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "electron-smoke-startup",
+        "resolvedExecutable": "C:\\nvm4w\\nodejs\\node.EXE",
+        "args": [
+          "scripts/launch.cjs"
+        ],
+        "cwd": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect",
+        "env": {
+          "BLOOMCONNECT_SMOKE_DIR": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect\\.tsupgrader\\runtime-validation\\electron-smoke",
+          "BLOOMCONNECT_SMOKE_STARTUP": "1"
+        },
+        "prependPath": [],
+        "platform": "win32"
+      }
+    ]
+  }
+}

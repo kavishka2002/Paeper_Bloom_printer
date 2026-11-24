@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-11-23T17:30:00Z",
+  "generatedOnPlatform": "win32",
+  "projectType": "electron",
+  "setup": [],
+  "assertions": [
+    {
+      "name": "typescript-no-emit",
+      "kind": "process",
+      "command": "npx",
+      "args": [
+        "tsc",
+        "--noEmit"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "electron-builds",
+      "kind": "process",
+      "command": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "npm",
+      "args": [
+        "test"
+      ],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "electron-smoke-startup",
+      "kind": "process",
+      "command": "node",
+      "args": [
+        "scripts/launch.cjs"
+      ],
+      "env": {
+        "BLOOMCONNECT_SMOKE_DIR": "C:\\Users\\User\\Desktop\\Paeper_Bloom_printer\\BloomConnect\\.tsupgrader\\runtime-validation\\electron-smoke",
+        "BLOOMCONNECT_SMOKE_STARTUP": "1"
+      },
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 180
+    }
+  ]
+}

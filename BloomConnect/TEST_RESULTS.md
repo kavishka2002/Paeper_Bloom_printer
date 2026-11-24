@@ -52,3 +52,29 @@ Packaged runtime smoke: PASS using release/win-unpacked/BloomConnect.exe with is
 - Signed Cloud webhook fixture verifies automatic reply and duplicate-message suppression.
 - Live WhatsApp delivery was not tested; no customer messages were sent.
 
+## WhatsApp QR freshness follow-up - 2026-11-23
+
+- QR images are now rendered only from the active `whatsapp-web.js` client's `qr` event. The page-canvas fallback was removed because it could display a QR without proving that the current client emitted it.
+- New QR events replace the previous image and update the client ID and generation time. The image is cleared on authentication, disconnect, failure, and after the local 30-second freshness window; expiry does not invent or refresh a QR payload.
+- QR rendering uses a 400×400 high-contrast PNG with a four-module quiet zone. Diagnostic activity records client IDs, timestamps, browser version, and lifecycle outcomes, never the raw QR payload.
+- `npm run build`: passed. `node --test tests/engine.test.cjs`: 20 passed. Standalone validation passed TypeScript, build, full `npm test` (exit code 0), and isolated Electron startup. The validation tool could not parse the Node TAP test count; the test command itself passed.
+- No dependencies were changed: `whatsapp-web.js` 1.34.8 and `puppeteer-core` 24.38.0 match the upstream Puppeteer 24.38.0 dependency. The detected system Chrome is 157.0.8103.79, newer than Puppeteer's bundled revision 146.0.7680.31; startup succeeds, but device linking against this browser combination was not verified.
+- No real WhatsApp phone scan or packaged-installer linking test was performed. Fixture QR tests validate event routing/rendering and lifecycle behavior only; they do not prove WhatsApp accepts a code.
+
+## WhatsApp QR startup follow-up - 2026-11-23
+
+- The user's running app diagnostics showed `whatsapp-web.js` timing out after 60 seconds while waiting for `WAWebSocketModel.Socket.state`; it never reached QR generation.
+- Root cause: the compatibility helper returned early when WhatsApp exposed a socket with an `on` method, even if its existing state did not reflect the current unpaired `Conn.ref`. The helper now derives `UNPAIRED_IDLE` from the current connection reference when no linked account is present, while preserving the original socket listener and state updates.
+- Added a regression test for an existing socket reporting `CLOSED` while a current QR reference is available.
+- `npm run build`: passed; `node --test tests/engine.test.cjs`: 20 passed; standalone TypeScript/build/full-suite/Electron startup checks: 4/4 passed.
+
+## WhatsApp lifecycle and timeout follow-up - 2026-11-23
+
+- The reported 60-second `Waiting failed` is the `whatsapp-web.js` `Client.inject()` wait for `WAWebSocketModel.Socket.state`; the first `window.Debug.VERSION` wait is converted to a different `auth timeout` error. Startup diagnostics now identify the wait stage and preserve a bounded, sanitized stack trace. The authentication-state helper is self-contained when serialized into Puppeteer's page context.
+- Logout/restart/startup are serialized around one client. An in-flight launch is stopped and awaited before auth-session cleanup; browser resources are closed before the selected LocalAuth session is cleared. Detached-frame logout errors are surfaced as “remote logout not confirmed” while local cleanup still proceeds safely.
+- Automatic reconnect is limited to three retries after an established connection drops. Initialization/authentication failures stop and display `Connection Failed` instead of looping. The settings screen displays engine progress and leaves logout available while startup is pending.
+- Browser executable, Chrome version, Puppeteer-pinned Chrome revision, WhatsApp page errors and WhatsApp request failures are logged without QR payloads or full request URLs. The installed system Chrome (157.0.8103.79) differs from Puppeteer's expected revision (146.0.7680.31); this is reported, not silently overridden or upgraded.
+- Added fixtures for duplicate starts, logout during browser launch, detached-frame logout, no automatic retry after initialization failure, and the exact authentication-state wait timeout. Focused WhatsApp tests: 10 passed.
+- Final standalone validation: TypeScript, Electron build, full `npm test` command, and isolated Electron startup all exited successfully (4/4 assertions). The validation tool could not parse TAP counts, so the full-suite result is reported by exit code; no dependencies were added or updated.
+- No live WhatsApp login/phone scan, packaged installer build, or packaged Windows account-switch test was performed. An already-installed executable will not contain these source changes until a release build is produced.
+
