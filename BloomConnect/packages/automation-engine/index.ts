@@ -18,6 +18,7 @@ import {WebAdapter,isWhatsAppSystemMessage,type WebMessage} from '../whatsapp-ad
 import {CloudAdapter,collect,signed,webhook} from '../whatsapp-adapters/cloud';
 import {schemas,type Attachment,type Customer,type Job,type Message,type Rule,type Snapshot,type Input,type Operation} from '../shared/contracts';
 import {notificationTemplates} from '../shared/notification-templates';
+import {billMessage} from '../shared/bill-message';
 
 const root=process.argv[2];
 const mediaDir=join(root,'documents');
@@ -287,10 +288,13 @@ function matches(rule:Rule,event:Event){
   return rule.enabled&&(rule.trigger===event.kind||(rule.trigger==='keyword'&&event.kind==='message'&&!!rule.keyword&&event.text?.toLowerCase().includes(rule.keyword.toLowerCase())));
 }
 async function automation(event:Event){
-  const matching=snapshot().rules.filter(rule=>matches(rule,event));
+  const rules=snapshot().rules;
+  const matching=rules.filter(rule=>matches(rule,event));
   const customPickup=event.kind==='pickup'&&matching.some(rule=>rule.id!=='default-pickup'&&rule.actions.includes('reply'));
+  const pickupReply=event.kind==='print-completed'&&rules.some(rule=>rule.enabled&&rule.trigger==='pickup'&&rule.actions.includes('reply'));
   for(const rule of matching){
     if(customPickup&&rule.id==='default-pickup')continue;
+    if(pickupReply&&rule.id==='default-print-completed')continue;
     const eventKey=event.kind+':'+event.id;
     const reservation=run("INSERT OR IGNORE INTO automation_executions VALUES (?,?,'Running',?)",rule.id,eventKey,now());
     if(!reservation.changes)continue;
@@ -313,7 +317,16 @@ async function automation(event:Event){
             customer_name:row<Customer>('SELECT name FROM customers WHERE id=?',event.customer)?.name??'',
             shop_name:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect'
           };
-          const text=rule.text.replace(/\{(job_id|total_amount|customer_name|shop_name)\}/g,(_,key:string)=>values[key]);
+          let text=rule.text.replace(/\{(job_id|total_amount|customer_name|shop_name)\}/g,(_,key:string)=>values[key]);
+          if(event.kind==='pickup'&&order){
+            const config=row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',order.id);
+            const pdfNames=config&&JSON.parse(config.settings).batchPdfFiles
+              ?printFiles(order.id).map(id=>row<{name:string}>('SELECT name FROM attachments WHERE id=?',id)?.name??'Document')
+              :undefined;
+            const bill=billMessage(values.shop_name,order,pdfNames);
+            const summary=text.length+bill.length+2>4096&&pdfNames?billMessage(values.shop_name,order):bill;
+            text=text.slice(0,4096-summary.length-2)+'\n\n'+summary;
+          }
           const account=notificationAccount(event.customer);
           if(!account)throw new Error('This customer has no conversation with the configured WhatsApp account.');
           const delay=(rule.debounceSeconds??0)*1000;
@@ -335,6 +348,18 @@ async function automation(event:Event){
     store.audit('Automation '+status.toLowerCase(),rule.name);
   }
   changed();
+}
+async function finishConfirmedOrder(id:string){
+  if(!allFilesConfirmed(id))return;
+  const order=job(id);
+  if(['Cancelled','Completed'].includes(order.status))return;
+  if(order.status!=='Ready for Pickup'){
+    run("UPDATE print_jobs SET status='Ready for Pickup' WHERE id=?",id);
+    store.audit('Order status',id+' · '+order.status+' → Ready for Pickup');
+    changed();
+  }
+  await automation({id,jobId:id,kind:'print-completed',customer:order.customer_id});
+  await automation({id,jobId:id,kind:'pickup',customer:order.customer_id});
 }
 function ingest(account:string,msg:WebMessage,events:Event[],imports:string[],historical=false){
   if(account.startsWith('web:')&&isWhatsAppSystemMessage(msg.kind))return;
@@ -599,7 +624,7 @@ async function deliverNotifications(){
  const account=connectedWhatsAppAccount();
  if(shuttingDown||notificationBusy||!account)return;
  notificationBusy=true;let touched=false;
- try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;event_key:string}>("SELECT * FROM notification_outbox WHERE account_id=? AND status='Pending' AND due<=? ORDER BY due LIMIT 10",account,Date.now())){
+ try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;event_key:string}>("SELECT * FROM notification_outbox WHERE account_id=? AND status='Pending' AND due<=? ORDER BY due,rowid LIMIT 10",account,Date.now())){
   if(shuttingDown||connectedWhatsAppAccount()!==account)break;
   touched=true;const [event,jobId]=item.event_key.split(':');if(['pickup','print-completed'].includes(event)&&!allFilesConfirmed(jobId)){run("UPDATE notification_outbox SET status='Cancelled',error='Order files are not all confirmed printed' WHERE id=?",item.id);continue}
   const rule=snapshot().rules.find(r=>r.id===item.rule_id);
@@ -632,17 +657,16 @@ const handlers:HandlerMap={
     catch(error){run("UPDATE attachments SET status='Failed' WHERE id=?",id);throw error}
   },
   async confirmPrintSubmissions({id,entries}:Input<'confirmPrintSubmissions'>){
-    const order=store.atomic(()=>{
-      const order=job(id);
+    store.atomic(()=>{
+      job(id);
       const pending=rows<{id:string;status:string}>("SELECT id,status FROM print_queue WHERE job_id=? AND status IN ('Printing','Submitted','Unconfirmed')",id);
       const expected=new Set(entries);
       if(pending.some(entry=>entry.status==='Printing'))throw new Error('Wait for the order to finish sending to the printer.');
       if(pending.length!==expected.size||pending.some(entry=>!expected.has(entry.id)))throw new Error('The print queue changed. Refresh and check the order before confirming.');
       run("UPDATE print_queue SET status='Completed' WHERE job_id=? AND status IN ('Submitted','Unconfirmed')",id);
       store.audit('Print queue status',id+' - '+pending.length+' submissions confirmed');
-      return order;
     });
-    if(allFilesConfirmed(id))await automation({id,jobId:id,kind:'print-completed',customer:order.customer_id});
+    await finishConfirmedOrder(id);
   },
   notificationLog(){return rows<{id:string}>('SELECT n.id,n.rule_id,n.customer_id,n.event_key,n.status,n.attempts,n.error,n.created,m.status AS delivery_status FROM notification_outbox n LEFT JOIN messages m ON m.id=n.message_id ORDER BY n.created DESC LIMIT 100').map(n=>({...n,sendAttempts:rows('SELECT attempted,result,error FROM notification_attempts WHERE notification_id=? ORDER BY id',n.id)}))},
   printEstimate:calculatePrint,
@@ -877,7 +901,7 @@ const internal:Record<string,(input:never)=>unknown>={
   },
   async queue({id,status}:Input<'queue'>){const item=row<{job_id:string;status:string}>('SELECT * FROM print_queue WHERE id=?',id);if(!item||!['Submitted','Unconfirmed','Failed'].includes(item.status)||status==='Completed'&&item.status==='Failed')throw new Error('This queue entry cannot be updated.');
     run('UPDATE print_queue SET status=? WHERE id=?',status,id);store.audit('Print queue status',item.job_id+' · '+status);
-    if(status==='Completed'&&allFilesConfirmed(item.job_id))await automation({id:item.job_id,jobId:item.job_id,kind:'print-completed',customer:job(item.job_id).customer_id})},
+    if(status==='Completed')await finishConfirmedOrder(item.job_id)},
   receiptData({id}:{id:string}){const payment=row('SELECT p.* FROM payments p JOIN receipts r ON r.id=p.id WHERE p.id=?',id);if(!payment)throw new Error('Receipt not found.');return {payment,shop:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect'}},
   billData({id}:{id:string}){
     const order=job(id);

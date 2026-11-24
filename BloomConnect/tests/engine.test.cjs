@@ -254,9 +254,16 @@ test('signed Cloud events produce one customer, media record, automatic order an
   await engine.call('printFinish',{id:submission,error:'',partial:false});
   await engine.call('printFinish',{id:submission,error:'',partial:false});
   assert.equal((await engine.call('snapshot',null)).messages.some(m=>m.body===completedNotice),false);
-  await engine.call('queue',{id:submission,status:'Completed'});await engine.call('stage',{id:eventOrder,status:'Ready for Pickup'});await engine.call('stage',{id:eventOrder,status:'Completed'});
+  await engine.call('queue',{id:submission,status:'Completed'});
+  assert.equal((await engine.call('snapshot',null)).jobs.find(job=>job.id===eventOrder).status,'Ready for Pickup');
+  await engine.call('stage',{id:eventOrder,status:'Ready for Pickup'});
+  await engine.call('stage',{id:eventOrder,status:'Completed'});
   const stageMessages=(await engine.call('snapshot',null)).messages;
-  for(const text of ['Registered '+eventOrder,readyNotice,'Started '+eventOrder,queuedNotice,completedNotice,'Pickup '+eventOrder+': 23.00','Collected '+eventOrder,'Price '+eventOrder+': 23.00'])assert.equal(stageMessages.filter(m=>m.body===text).length,1);
+  for(const text of ['Registered '+eventOrder,readyNotice,'Started '+eventOrder,queuedNotice,'Collected '+eventOrder,'Price '+eventOrder+': 23.00'])assert.equal(stageMessages.filter(m=>m.body===text).length,1);
+  assert.equal(stageMessages.some(m=>m.body===completedNotice),false);
+  const pickupMessages=stageMessages.filter(m=>m.body.startsWith('Pickup '+eventOrder+': 23.00\n\n'));
+  assert.equal(pickupMessages.length,1);
+  assert.ok(pickupMessages[0].body.endsWith('Total LKR 23.00\nPaid LKR 0.00\nBalance LKR 23.00'));
   const eventLog=await engine.call('notificationLog',null);assert.ok(eventLog.filter(n=>n.rule_id.startsWith('event-')).every(n=>n.sendAttempts.length===1&&n.status==='Accepted'));
   assert.equal(eventLog.some(item=>item.rule_id==='default-pickup'),false);
   await engine.call('rule',{id:'event-pickup',name:'pickup',trigger:'pickup',keyword:'',actions:['reply'],text:'Pickup {job_id}: {total_amount}',debounceSeconds:0,enabled:false,graph:''});
@@ -269,7 +276,8 @@ test('signed Cloud events produce one customer, media record, automatic order an
   const pickup=(await engine.call('snapshot',null)).messages.find(message=>message.body.startsWith('🎉 *ඔබගේ ඇණවුම සූදානම්!*')&&message.body.includes(pickupOrder));
   assert.ok(pickup);
   assert.ok(pickup.body.includes('ආයුබෝවන් '+state.customers[0].name+','));
-  assert.ok(pickup.body.endsWith('*'+state.settings.shop+'*'));
+  assert.ok(pickup.body.includes('*'+state.settings.shop+'*\n\n'));
+  assert.ok(pickup.body.endsWith('Total LKR 23.00\nPaid LKR 0.00\nBalance LKR 23.00'));
   await engine.call('reply',{id:state.customers[0].id,text:'Received.'});
   assert.equal((await engine.call('snapshot',null)).messages.at(-1).status,'accepted');
   const stale=JSON.parse(body);

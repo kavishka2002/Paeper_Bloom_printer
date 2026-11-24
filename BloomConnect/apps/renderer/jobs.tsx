@@ -13,6 +13,7 @@ import {useEffect,useId,useRef,useState,type FormEvent} from 'react';
 import {BookOpen,Files,FileText,Plus,Printer,ShoppingBag,Wallet} from 'lucide-react';
 import {colomboDay,DetailDrawer,PageLayoutChoices,RevenueChart,StatCard,Tabs} from './design';
 import {schemas,stages,type Input,type Job,type PricingRule,type PrintPreset} from '../../packages/shared/contracts';
+import {billMessage} from '../../packages/shared/bill-message';
 import {useData,Button,Panel,Badge,Empty,Table,PrinterSelect,PrinterPropertiesButton,match,stamp,money,name,orderStatusLabels} from './context';
 import {useWorkspace} from './state';
 import {DocumentPreview,DocumentThumbnail,ImposedPreview} from './pdf';
@@ -433,8 +434,7 @@ function BillDrawer({order,onClose}:{order:Job;onClose:()=>void}){
  const customer=name(data,order.customer_id);
  const fileNames=order.files.map(id=>data.attachments.find(file=>file.id===id)?.name??'Document');
  const batchOrder=!!order.printSettings?.batchPdfFiles;
- const fileList=batchOrder?`\n${fileNames.length} PDFs\n${fileNames.join('\n').slice(0,2500)}\n`:'';
- const text=`${data.settings?.shop??'BloomConnect'} / Order ${order.id}${fileList}\nTotal ${money(order.total)}\nPaid ${money(order.paid)}\nBalance ${money(order.total-order.paid)}`;
+ const text=billMessage(data.settings?.shop??'BloomConnect',order,batchOrder?fileNames:undefined);
  const [draft,setDraft]=useState(text);
  const [sharing,setSharing]=useState(false);
  const enabled=!!order.customer_id&&order.status!=='Cancelled'&&['Connected','API reachable'].includes(data.connection.status);
