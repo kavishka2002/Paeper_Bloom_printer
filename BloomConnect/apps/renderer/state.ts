@@ -1,2 +1,25 @@
 import {create} from 'zustand';
-export const useWorkspace=create<{view:string;photoStudio:boolean;photoDraft:string[];search:string;dark:boolean;attachment:string;scannerAttachment:string;pdfPrintAttachment:string;autoPdfPrint:boolean;job:string;customer:string;set:(values:Partial<{view:string;photoStudio:boolean;photoDraft:string[];search:string;dark:boolean;attachment:string;scannerAttachment:string;pdfPrintAttachment:string;autoPdfPrint:boolean;job:string;customer:string}>)=>void}>(set=>({view:'Dashboard',photoStudio:false,photoDraft:[],search:'',dark:localStorage.getItem('theme')==='dark',attachment:'',scannerAttachment:'',pdfPrintAttachment:'',autoPdfPrint:localStorage.getItem('autoPdfPrint')!=='off',job:'',customer:'',set}));
+
+type WorkspaceValues={
+ view:string;
+ photoStudio:boolean;
+ photoDraft:string[];
+ lightenPhotoDraft:boolean;
+ search:string;
+ dark:boolean;
+ attachment:string;
+ scannerAttachment:string;
+ pdfPrintAttachment:string;
+ pdfBatchDraft:string[];
+ autoPdfPrint:boolean;
+ job:string;
+ customer:string;
+ orderScope:'all'|'open';
+};
+
+export const useWorkspace=create<WorkspaceValues&{set:(values:Partial<WorkspaceValues>)=>void}>(set=>({
+ view:'Dashboard',photoStudio:false,photoDraft:[],lightenPhotoDraft:false,search:'',
+ dark:localStorage.getItem('theme')==='dark',attachment:'',scannerAttachment:'',
+ pdfPrintAttachment:'',pdfBatchDraft:[],autoPdfPrint:localStorage.getItem('autoPdfPrint')!=='off',
+ job:'',customer:'',orderScope:'all',set
+}));

@@ -6,6 +6,48 @@ const mod={exports:{}};new Function('module','exports','require',built)(mod,mod.
 const {calculatePrint:calculate,calculateBulk,documentPricing}=mod.exports;
 const rate={basis:'sheet',mono:1000,colour:5000};
 const base={documentPages:10,pricing:rate};
+test('A3 and Legal rates price each file and duplex sheet independently',()=>{
+ const rates={mono:1000,colour:5000,duplexMono:1600,paperRates:{A3:{mono:2000,duplexMono:2600},Legal:{mono:1500,colour:0}}};
+ const price=(paper,duplex)=>documentPricing(rates,duplex,'sheet',paper);
+ assert.equal(price('A4','simplex').mono,1000);
+ assert.equal(price('A4','auto').mono,1600);
+ assert.equal(price('A3','auto').mono,2600);
+ assert.equal(price('Legal','auto').mono,1500);
+ assert.equal(price('Legal','simplex').colour,0);
+ assert.equal(price('A3','simplex').colour,5000);
+ const batch=calculateBulk([
+  {id:'a3',customer:null,settings:{documentPages:3,paper:'A3',duplex:'auto',pricing:price('A3','auto')}},
+  {id:'legal',customer:null,settings:{documentPages:2,paper:'Legal',pricing:price('Legal','simplex')}}
+ ]);
+ assert.equal(batch.totalPhysicalSheets,4);
+ assert.equal(batch.finalTotal,8200);
+});
+test('A4 supports separate and shared rates per physical sheet',()=>{
+ const rates={mono:1000,colour:5000,duplexMono:1600,duplexColour:8000};
+ const a4={mono:1200,colour:4000,duplexMono:1900,duplexColour:6500};
+ const total=(duplex,mode,samePrice)=>calculate({
+  documentPages:5,paper:'A4',duplex,mode,
+  pricing:documentPricing({...rates,paperRates:{A4:{...a4,samePrice}}},duplex,'sheet','A4')
+ }).finalTotal;
+ assert.equal(total('simplex','mono',false),6000);
+ assert.equal(total('simplex','colour',false),20000);
+ assert.equal(total('auto','mono',false),5700);
+ assert.equal(total('auto','colour',false),19500);
+ assert.equal(total('auto','mono',true),3600);
+ assert.equal(total('auto','colour',true),12000);
+ assert.equal(documentPricing({...rates,paperRates:{A4:{samePrice:true}}},'auto','sheet','A4').mono,1000);
+ for(const [a4,oneSide,bothSides] of [
+  [{mono:1000,samePrice:true},1000,1000],
+  [{mono:800,duplexMono:1500},800,1500]
+ ]){
+  const shop={...rates,paperRates:{A4:a4}};
+  const price=(documentPages,duplex)=>calculate({documentPages,paper:'A4',duplex,pricing:documentPricing(shop,duplex,'sheet','A4')});
+  assert.equal(price(1,'simplex').finalTotal,oneSide);
+  assert.equal(price(2,'simplex').finalTotal,oneSide*2);
+  assert.equal(price(2,'auto').totalPhysicalSheets,1);
+  assert.equal(price(2,'auto').finalTotal,bothSides);
+ }
+});
 test('presentation handouts use independent physical-sheet counts for six-up and eight-up duplex',()=>{
  assert.equal(calculate({documentPages:48,pagesPerSide:6,duplex:'shortEdge'}).totalPhysicalSheets,4);
  assert.equal(calculate({documentPages:48,pagesPerSide:8,duplex:'longEdge'}).totalPhysicalSheets,3);

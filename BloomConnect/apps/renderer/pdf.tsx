@@ -1,19 +1,27 @@
 import {enhancePixels,sharpenPixels} from '../../packages/printing/image-processing';
+import {cleanDocument} from '../../packages/printing/scan-image';
+import {scanPresets} from '../../packages/shared/scan';
 import {useEffect,useRef,useState} from 'react';
 import {getDocument,GlobalWorkerOptions} from 'pdfjs-dist';
 import worker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {planPhotos,planDocument,plannedOutput,placementGeometry,photoPlacementGeometry,analysePixels,type DocumentInfo,type PlannedSide,type DocumentPlan} from '../../packages/printing/plan';
 import {normalizedSettings,type PrintSettings} from '../../packages/printing/settings';
+import {fitRasterDpi} from '../../packages/printing/raster-budget';
+import {orientedPaper} from '../../packages/printing/plan';
+import {duplexEdge,resolveDuplex} from '../../packages/printing/duplex';
 
 import type {Input} from '../../packages/shared/contracts';
 GlobalWorkerOptions.workerSrc=worker;
 
-type PrintData={input:Input<'print'>;files:{id:string}[]};
+type PrintData={input:Input<'print'>;files:{id:string}[];testDuplex?:boolean};
 declare global{interface Window{printView:{load:()=>Promise<PrintData>;done:(error:string)=>void}}}
-function pdf(bytes:Uint8Array){
+export function openPdf(bytes:Uint8Array,password?:string){
+  return pdf(bytes,{password,isEvalSupported:false});
+}
+function pdf(bytes:Uint8Array,options?:{password?:string;isEvalSupported?:boolean}){
   const assets=new URL('./assets/pdfjs/',document.baseURI);
   return getDocument({
-    data:bytes,enableXfa:false,stopAtErrors:true,
+    data:bytes,...options,enableXfa:false,stopAtErrors:true,
     cMapUrl:new URL('cmaps/',assets).href,
     standardFontDataUrl:new URL('standard_fonts/',assets).href,
     wasmUrl:new URL('wasm/',assets).href,
@@ -108,13 +116,19 @@ export async function renderPlannedSide(source:Source,info:DocumentInfo,plan:Doc
     const sharpening=edit?.sharpness??(source.doc?s.scanSharpen:0);
     const tones=edit??(source.doc&&s.scanDenoise?{denoise:s.scanDenoise}:undefined);
     const enhance=tones&&(tones.denoise||edit?.autoContrast||edit?.exposure||edit?.warmth||edit?.shadows||edit?.highlights);
-    if(sharpening||enhance){
+    const lightening=edit?.documentLightening??0;
+    if(sharpening||enhance||lightening){
       const buffer=scratch.getContext('2d')!,pixels=buffer.getImageData(0,0,scratch.width,scratch.height);
+      if(lightening){
+        const {data,width,height}=pixels;
+        const raster={data:new Uint8Array(data.buffer,data.byteOffset,data.byteLength),width,height};
+        data.set(cleanDocument(raster,{...scanPresets[0].settings,white:lightening,contrast:0,shadow:100,denoise:0,sharpness:0},4,true).data);
+      }
       if(enhance)enhancePixels(pixels.data,pixels.width,pixels.height,tones);
       if(sharpening)sharpenPixels(pixels.data,pixels.width,pixels.height,sharpening);
       buffer.putImageData(pixels,0,0);
     }
-    if((s.ink==='mono'||edit?.ink==='mono')&&!placement.colour){
+    if(!lightening&&(s.ink==='mono'||edit?.ink==='mono')&&!placement.colour){
       const pixels=scratch.getContext('2d')!.getImageData(0,0,scratch.width,scratch.height);
       for(let i=0;i<pixels.data.length;i+=4){const v=.2126*pixels.data[i]+.7152*pixels.data[i+1]+.0722*pixels.data[i+2]>=180?255:0;pixels.data[i]=pixels.data[i+1]=pixels.data[i+2]=v}
       scratch.getContext('2d')!.putImageData(pixels,0,0);
@@ -177,16 +191,23 @@ export function ImposedPreview({id,input,photoIds,lockPhotoAspect,onPhotoMove}:{
   useEffect(()=>{
     let active=true;let source:Source|undefined;
     setLoading(true);setError('');
-    void (async()=>{
+    const render=async()=>{
       const info=await inspectDocument(id),options=JSON.parse(settings),plan=photoIds?.length?planPhotos(options,await Promise.all(photoIds.map(inspectDocument))):planDocument({...options,copies:options.fileCopies?.[id]??options.copies},info),sides=plannedOutput(plan);
       if(!sides.length)throw new Error('No sides in this selection.');
       source=await openSource(id);if(!active)return;
       const index=Math.min(side,sides.length-1),canvas=document.createElement('canvas');if(photoIds?.length)await renderPhotoSheet(plan,sides[index],canvas);else await renderPlannedSide(source,info,plan,sides[index],canvas);
       if(active){const target=ref.current!;target.width=canvas.width;target.height=canvas.height;target.getContext('2d')!.drawImage(canvas,0,0);setTotal(sides.length);if(index!==side)setSide(index);visibleSide.current={side:sides[index],index}}
-    })().catch(e=>{if(active)setError(e.message??String(e))}).finally(()=>{void source?.close();if(active)setLoading(false)});
-    return()=>{active=false};
+    };
+    const start=()=>void render().catch(e=>{if(active)setError(e.message??String(e))}).finally(()=>{void source?.close();if(active)setLoading(false)});
+    const timer=photoIds?.length?window.setTimeout(start,120):undefined;
+    if(timer===undefined)start();
+    return()=>{active=false;window.clearTimeout(timer)};
   },[id,settings,side,photoKey]);
   const sheet=visibleSide.current?.side;
+  const duplex=!!sheet&&input.duplex!=='simplex';
+  const landscape=!!sheet&&(sheet.width===sheet.height?input.landscape:sheet.width>sheet.height);
+  const edge=duplexEdge(input.duplex,landscape);
+  const horizontal=landscape?edge==='long':edge==='short';
   function dragFrame(clientX:number,clientY:number){
     const start=drag.current,canvas=ref.current;
     if(!start||!canvas||!sheet)return;
@@ -231,7 +252,9 @@ export function ImposedPreview({id,input,photoIds,lockPhotoAspect,onPhotoMove}:{
    onPointerCancel={()=>{drag.current=undefined;setGhost(undefined)}}
    hidden={loading||!!error} style={zoom===100?undefined:{width:zoom+'%',maxWidth:'none',maxHeight:'none',height:'auto'}}/>
    {onPhotoMove&&outlineStyle&&!loading&&!error&&<div className="photo-frame-outline" style={outlineStyle} aria-hidden="true">{['nw','ne','sw','se'].map(corner=><i key={corner} data-corner={corner}/>)}</div>}
-  </div><div className="preview-controls"><button disabled={side===0||loading} onClick={()=>{setSelection(undefined);setSide(side-1)}}>Previous</button><span>{!input.duplex||input.duplex==='simplex'||!total?<>Side {side+1} / {total}</>:<>Sheet {Math.floor(side/2)+1} / {Math.ceil(total/2)} ({side%2===0?'Front':'Back'})</>}</span><button disabled={side+1>=total||loading} onClick={()=>{setSelection(undefined);setSide(side+1)}}>Next</button><select aria-label="Final preview zoom" value={zoom} onChange={e=>{setSelection(undefined);setZoom(Number(e.target.value))}}>{[75,100,125,150,200].map(value=><option key={value} value={value}>{value===100?'Fit':value+'%'}</option>)}</select></div></div>;
+  </div><div className="preview-controls"><button disabled={side===0||loading} onClick={()=>{setSelection(undefined);setSide(side-1)}}>Previous</button><span>{!input.duplex||input.duplex==='simplex'||!total?<>Side {side+1} / {total}</>:<>Sheet {Math.floor(side/2)+1} / {Math.ceil(total/2)} ({side%2===0?'Front':'Back'})</>}</span><button disabled={side+1>=total||loading} onClick={()=>{setSelection(undefined);setSide(side+1)}}>Next</button><select aria-label="Final preview zoom" value={zoom} onChange={e=>{setSelection(undefined);setZoom(Number(e.target.value))}}>{[75,100,125,150,200].map(value=><option key={value} value={value}>{value===100?'Fit':value+'%'}</option>)}</select></div>
+  {duplex&&<div className="preview-controls duplex-preview"><small>{landscape?'Landscape':'Portrait'} · {edge==='long'?'Long edge':'Short edge'} · {horizontal?'Flip top to bottom':'Flip left to right'}</small>
+   <button type="button" disabled={loading||(side^1)>=total} onClick={()=>{setSelection(undefined);setSide(side^1)}}>Flip to {side%2===0?'back':'front'}</button></div>}</div>;
 }
 export function DocumentThumbnail({id}:{id:string}){
   const ref=useRef<HTMLCanvasElement>(null),[visible,setVisible]=useState(false),[loaded,setLoaded]=useState(false);
@@ -284,8 +307,33 @@ export function DocumentPreview({id,onCount}:{id:string;onCount?:(count:number)=
 }
 export async function preparePrint(){
   try{
-    const {input,files}=await window.printView.load();
+    const {input,files,testDuplex}=await window.printView.load();
     const options=normalizedSettings(input),root=document.getElementById('root')!;
+    if(testDuplex){
+      const [width,height]=orientedPaper(options);
+      const landscape=width===height?options.landscape:width>height;
+      const binding=resolveDuplex(options.duplex,landscape);
+      const style=document.createElement('style');
+      style.textContent=`@page{size:${width}mm ${height}mm;margin:0}html,body,#root{margin:0;background:white!important}.sheet{width:${width}mm;height:${height}mm;break-after:page;overflow:hidden}.sheet:last-child{break-after:auto}.sheet canvas{width:100%;height:100%;display:block}`;
+      document.head.append(style);
+      const faces=options.sideSelection==='all'?[false,true]:[options.sideSelection==='back'];
+      for(const back of faces){
+        const section=document.createElement('div'),canvas=document.createElement('canvas');
+        const scale=Math.min(5,2200/Math.max(width,height));
+        section.className='sheet';canvas.width=Math.round(width*scale);canvas.height=Math.round(height*scale);
+        const ctx=canvas.getContext('2d')!;
+        ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);
+        const unit=Math.min(canvas.width,canvas.height)/100;
+        ctx.fillStyle='black';ctx.textAlign='center';ctx.font='bold '+(6*unit)+'px sans-serif';
+        ctx.fillText((back?'BACK':'FRONT')+' — TOP ↑',canvas.width/2,15*unit);
+        ctx.font=(2.5*unit)+'px sans-serif';ctx.fillText((landscape?'Landscape':'Portrait')+' · '+duplexEdge(binding,landscape)+' edge',canvas.width/2,21*unit);
+        ctx.fillText('Turn the sheet at the binding edge and compare the arrows.',canvas.width/2,canvas.height/2);
+        ctx.textAlign='left';ctx.fillText('TOP LEFT',6*unit,8*unit);
+        section.append(canvas);root.append(section);
+      }
+      Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour:false,sides:faces.length}});
+      window.printView.done('');return;
+    }
     const all=[] as {file:{id:string};info:DocumentInfo;plan:DocumentPlan;sides:PlannedSide[]}[];
     const photoFiles=files.filter(file=>!!options.photoItems[file.id]);
     if(photoFiles.length){const infos=await Promise.all(photoFiles.map(f=>inspectDocument(f.id))),plan=planPhotos(options,infos);all.push({file:photoFiles[0],info:infos[0],plan,sides:plannedOutput(plan)})}
@@ -295,18 +343,19 @@ export async function preparePrint(){
       all.push({file,info,plan,sides:plannedOutput(plan)});
     }
     if(!all.length)throw new Error('No printable files.');
-    const dimensions=all.flatMap(item=>item.sides).map(side=>[side.width,side.height]);
+    const dimensions=all.flatMap(item=>item.sides).map(side=>[side.width,side.height] as const);
     if(!dimensions.length)throw new Error('No sides to print.');
     const [width,height]=dimensions[0];if(dimensions.some(([w,h])=>w!==width||h!==height))throw new Error('Mixed paper orientation requires separate submissions.');
     if(dimensions.length>200)throw new Error('A submission can contain at most 200 imposed sides including copies.');
-    if(dimensions.reduce((n,[w,h])=>n+w*h*(options.renderDpi/25.4)**2,0)>120000000)throw new Error('This submission exceeds the safe raster memory limit. Use fewer copies/pages or lower DPI.');
+    const renderDpi=fitRasterDpi(dimensions,options.renderDpi);
     const style=document.createElement('style');style.textContent=`@page{size:${width}mm ${height}mm;margin:0}html,body,#root{margin:0;background:white!important}.sheet{width:${width}mm;height:${height}mm;break-after:page;overflow:hidden}.sheet:last-child{break-after:auto}.sheet canvas{display:block;width:100%;height:100%}`;document.head.append(style);
     const faces:boolean[]=[];let hasColour=false;
     for(const item of all){
       const source=await openSource(item.file.id);
-      try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(side.placements.some(p=>p.file))await renderPhotoSheet(item.plan,side,canvas);else await renderPlannedSide(source,item.info,item.plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{await source.close()}
+      const plan={...item.plan,settings:{...item.plan.settings,renderDpi}};
+      try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(side.placements.some(p=>p.file))await renderPhotoSheet(plan,side,canvas);else await renderPlannedSide(source,item.info,plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{await source.close()}
     }
-    Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour,sides:dimensions.length}});
+    Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour,sides:dimensions.length,renderDpi}});
     window.printView.done('');
   }catch(error){window.printView.done(error instanceof Error?error.message:'Could not prepare print layout.')}
 }

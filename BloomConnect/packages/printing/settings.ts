@@ -1,3 +1,4 @@
+import {duplexModes} from './duplex';
 import {z} from 'zod';
 import {paperNames,paperDimensions} from './paper';
 const mm=z.number().finite().min(0).max(150);
@@ -6,9 +7,9 @@ export const manualFeedProfileSchema=z.object({
   instructions:z.string().trim().min(3).max(500)
 });
 export type ManualFeedProfile=z.output<typeof manualFeedProfileSchema>;
-export const printSettingsSchema=z.object({
+const basePrintSettingsSchema=z.object({
   printer:z.string().max(512),paper:z.enum(paperNames),customPaper:z.object({widthMm:z.number().min(20).max(2000),heightMm:z.number().min(20).max(2000)}).optional(),
-  copies:z.number().int().min(1).max(100),colour:z.boolean(),landscape:z.boolean(),duplex:z.enum(['simplex','longEdge','shortEdge','manualLongEdge','manualShortEdge']),
+  copies:z.number().int().min(1).max(100),colour:z.boolean(),landscape:z.boolean(),duplex:z.enum(duplexModes),
   range:z.string().max(2000),rotation:z.number().int().min(0).max(270).multipleOf(90),fit:z.enum(['contain','cover']),layout:z.enum(['single','four','passport']),
   nup:z.number().int().min(1).max(64).default(1),booklet:z.boolean().default(false),binding:z.enum(['left','right']).default('left'),marginMm:mm.default(0),gapMm:mm.default(0),borders:z.boolean().default(false),
   handoutNotes:z.boolean().default(false),
@@ -39,12 +40,26 @@ export const printSettingsSchema=z.object({
   photoAdjustments:z.object({charge:z.number().int().min(0).max(100000000),discount:z.number().int().min(0).max(100000000)}).optional(),
   photoMedia:z.string().trim().min(1).max(80).default('Default'),
   photoArrangement:z.enum(['auto','grid','rows','columns','manual']).default('auto'),
-  photoGrid:z.object({rows:z.number().int().min(1).max(8),columns:z.number().int().min(1).max(8)}).optional(),
+  photoGrid:z.object({rows:z.number().int().min(1).max(8),columns:z.number().int().min(1).max(8),capacity:z.number().int().min(1).max(64).optional()}).optional(),
   photoPositions:z.array(z.object({file:z.string().min(1).max(256),copy:z.number().int().min(0).max(99),sheet:z.number().int().min(0).max(199),x:z.number().min(0).max(2000),y:z.number().min(0).max(2000),frame:z.object({width:z.number().min(1).max(2000),height:z.number().min(1).max(2000),rotation:z.number().int().min(0).max(270).multipleOf(90)}).optional()})).max(1000).optional(),
   photoMaxPerSheet:z.number().int().min(1).max(64).optional(),
   photoBatch:z.boolean().default(false),
-  photoItems:z.record(z.string(),z.object({widthMm:z.number().min(10).max(1000),heightMm:z.number().min(10).max(1000),quantity:z.number().int().min(1).max(100),rotation:z.number().int().min(0).max(270).multipleOf(90).default(0),fit:z.enum(['contain','cover']).default('contain'),brightness:z.number().min(25).max(200).default(100),contrast:z.number().min(25).max(200).default(100),saturation:z.number().min(0).max(200).default(100),sharpness:z.number().min(0).max(100).default(0),flipX:z.boolean().default(false),flipY:z.boolean().default(false),zoom:z.number().min(1).max(4).default(1),background:z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#ffffff'),ink:z.enum(['inherit','colour','original','grayscale','mono','sepia','auto']).default('inherit'),detectedColour:z.boolean().optional(),autoContrast:z.boolean().default(false),exposure:z.number().min(-2).max(2).default(0),warmth:z.number().min(-100).max(100).default(0),shadows:z.number().min(-100).max(100).default(0),highlights:z.number().min(-100).max(100).default(0),denoise:z.number().min(0).max(100).default(0),crop:z.object({x:z.number().min(0).max(.99),y:z.number().min(0).max(.99),width:z.number().min(.01).max(1),height:z.number().min(.01).max(1)}).refine(c=>c.x+c.width<=1.000001&&c.y+c.height<=1.000001,'Crop must remain within the original image.').optional()})).default({}),
+  photoItems:z.record(z.string(),z.object({widthMm:z.number().min(10).max(1000),heightMm:z.number().min(10).max(1000),quantity:z.number().int().min(1).max(100),rotation:z.number().int().min(0).max(270).multipleOf(90).default(0),fit:z.enum(['contain','cover']).default('contain'),brightness:z.number().min(25).max(200).default(100),contrast:z.number().min(25).max(200).default(100),saturation:z.number().min(0).max(200).default(100),sharpness:z.number().min(0).max(100).default(0),flipX:z.boolean().default(false),flipY:z.boolean().default(false),zoom:z.number().min(1).max(4).default(1),background:z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#ffffff'),ink:z.enum(['inherit','colour','original','grayscale','mono','sepia','auto']).default('inherit'),detectedColour:z.boolean().optional(),documentLightening:z.number().min(0).max(100).default(0),autoContrast:z.boolean().default(false),exposure:z.number().min(-2).max(2).default(0),warmth:z.number().min(-100).max(100).default(0),shadows:z.number().min(-100).max(100).default(0),highlights:z.number().min(-100).max(100).default(0),denoise:z.number().min(0).max(100).default(0),crop:z.object({x:z.number().min(0).max(.99),y:z.number().min(0).max(.99),width:z.number().min(.01).max(1),height:z.number().min(.01).max(1)}).refine(c=>c.x+c.width<=1.000001&&c.y+c.height<=1.000001,'Crop must remain within the original image.').optional()})).default({}),
   photo:z.object({widthMm:z.number().min(10).max(1000),heightMm:z.number().min(10).max(1000),quantity:z.number().int().min(1).max(500),cutGuides:z.boolean().default(false),whiteBorderMm:z.number().min(0).max(20).default(0)}).optional()
+});
+export const batchPdfFileSchema=basePrintSettingsSchema.omit({
+ printer:true,fileSelection:true,fileCopies:true,sideSelection:true,manualFeedApplied:true,
+ photoItems:true,photo:true,photoBatch:true,photoGrid:true,photoArrangement:true,photoMedia:true,
+ photoPositions:true,photoMaxPerSheet:true,photoAdjustments:true,pdfSettings:true
+}).extend({
+ rotation:basePrintSettingsSchema.shape.rotation.default(0),
+ fit:basePrintSettingsSchema.shape.fit.default('contain'),
+ layout:basePrintSettingsSchema.shape.layout.default('single')
+});
+export type BatchPdfFile=z.input<typeof batchPdfFileSchema>;
+export const printSettingsSchema=basePrintSettingsSchema.extend({
+ batchPdfFiles:z.record(z.string(),batchPdfFileSchema).optional(),
+ orderAdjustments:z.object({charge:z.number().int().min(0).max(100000000),discount:z.number().int().min(0).max(100000000)}).optional()
 });
 export type PrintSettings=z.output<typeof printSettingsSchema>;
 export type PrintSettingsInput=z.input<typeof printSettingsSchema>;

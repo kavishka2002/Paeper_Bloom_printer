@@ -6,6 +6,7 @@ import type {ScanWork} from '../printing/scan-worker';
 import {planPhotos,type DocumentInfo} from '../printing/plan';
 import {defaultPresets} from '../printing/presets';
 import {calculatePrint,calculateBulk} from '../printing/calculation';
+import {batchPdfFileSchema} from '../printing/settings';
 import {createServer} from 'node:http';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile,writeFile,mkdir,copyFile,readdir,stat,rename,unlink} from 'node:fs/promises';
@@ -54,12 +55,15 @@ function scanWork<T>(token:string,input:ScanWork):Promise<T>{
 store.atomic(()=>{
   const rules=rows<{data:string}>('SELECT data FROM automation_rules').map(row=>JSON.parse(row.data) as Rule);
   for(const template of notificationTemplates){
-    if(template.event!=='ready-to-print'&&template.event!=='print-queued'&&template.event!=='print-completed')continue;
+    if(template.event!=='ready-to-print'&&template.event!=='print-queued'&&template.event!=='print-completed'&&template.event!=='pickup')continue;
     const id='default-'+template.event;
     const existing=rules.find(rule=>rule.id===id);
     if(existing){
-      const previousSinhala=template.si.replace('රැකියා අංකය:', 'Job Number:');
-      if(existing.trigger===template.event&&(existing.text===template.en||existing.text===previousSinhala)){
+      const legacySinhala=template.event==='print-queued'?template.si.replace('\nඇණවුම් අංකය:',' රැකියා අංකය:'):template.si;
+      const previousSinhala=legacySinhala.replace('රැකියා අංකය:', 'Job Number:');
+      const previousEnglish=template.event==='print-queued'?template.en.replace('\nOrder reference:', ' Job Number:'):template.en;
+      const oldPickup=template.event==='pickup'&&['Your order is ready for pickup. Job Number: {job_id}. Total: Rs. {total_amount}','ඔබගේ ඇණවුම ලබාගැනීමට සූදානම්. Job Number: {job_id}. මුළු මුදල: රු. {total_amount}'].includes(existing.text);
+      if(existing.trigger===template.event&&(oldPickup||[template.en,previousEnglish,legacySinhala,previousSinhala].includes(existing.text))){
         run('UPDATE automation_rules SET data=? WHERE id=?',JSON.stringify({...existing,text:template.si}),id);
       }
       continue;
@@ -71,20 +75,23 @@ store.atomic(()=>{
 });
 const interrupted=run("UPDATE print_queue SET status='Unconfirmed',error='BloomConnect restarted before submission was confirmed. Check the printer output before retrying.' WHERE status='Printing'");
 if(interrupted.changes)store.audit('Printer recovery','Interrupted submissions require operator verification.');
-const changed=()=>process.send?.({type:'changed'});
+const changed=()=>{if(process.connected)process.send?.({type:'changed'},()=>{})};
 let adapter:CloudAdapter|undefined;
 let web:WebAdapter|undefined;
+let stoppingWeb:WebAdapter|undefined;
 let webTransition=false;
+let webOperation=0;
 let cloudTransition=false;
 let webRetry:ReturnType<typeof setTimeout>|undefined;
 let webRetryAttempt=0;
+const maxWebRetries=3;
 let shuttingDown=false;
 function retryWeb(){
-  if(shuttingDown||webRetry||store.setting('whatsappProvider')!=='web')return;
-  const delay=Math.min(5000*2**Math.min(webRetryAttempt++,4),60000);
+  if(shuttingDown||webRetry||webRetryAttempt>=maxWebRetries||store.setting('whatsappProvider')!=='web')return;
+  const delay=Math.min(5000*2**webRetryAttempt++,30000);
   webRetry=setTimeout(()=>{
     webRetry=undefined;
-    if(!shuttingDown&&store.setting('whatsappProvider')==='web')void connectWeb().catch(()=>retryWeb());
+    if(!shuttingDown&&store.setting('whatsappProvider')==='web')void connectWeb(null,true).catch(()=>{});
   },delay);
 }
 let connection:Snapshot['connection']={status:'Disconnected',phone:'',webhook:false};
@@ -105,18 +112,25 @@ function allFilesConfirmed(id:string){
  }
  const files=printFiles(id);return files.length>0&&files.every(file=>covered.has(file));
 }
-function snapshot():Snapshot{return {
+function snapshot():Snapshot{
+ const activeAccount=web?.account||adapter?.config.phoneId;
+ return {
   settings:store.setting('shop'),customers:rows('SELECT * FROM customers ORDER BY last DESC'),
-  messages:rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages ORDER BY created'),
+  messages:activeAccount
+    ?rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages WHERE account_id=? ORDER BY created',activeAccount)
+    :connection.mode==='web'?[]:rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages ORDER BY created'),
   attachments:rows('SELECT '+attachmentFields+' FROM attachments ORDER BY created DESC'),
   jobs:rows<Job>(jobQuery+' ORDER BY j.id DESC').map(j=>({...j,files:printFiles(j.id),printSettings:JSON.parse(row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',j.id)?.settings??'null')??undefined,calculations:rows<{attachment_id:string;input:string;result:string}>('SELECT * FROM print_calculations WHERE job_id=?',j.id).map(c=>({id:c.attachment_id,settings:JSON.parse(c.input),result:JSON.parse(c.result)}))})),
   payments:rows('SELECT * FROM payments ORDER BY created DESC'),queue:rows('SELECT * FROM print_queue ORDER BY created DESC'),
   rules:rows<{data:string}>('SELECT data FROM automation_rules ORDER BY rowid').map(r=>JSON.parse(r.data) as Rule),
   activity:rows('SELECT * FROM activity_logs ORDER BY id DESC LIMIT 300'),connection
-}}
+ }
+}
 function createOrder(input:Input<'order'>){
   if(new Set(input.files).size!==input.files.length)throw new Error('Select each file once.');
-  for(const id of input.files){const a=row<Attachment>('SELECT * FROM attachments WHERE id=?',id);if(!a||a.status!=='Ready'||a.customer_id!==input.customer)throw new Error('Select ready files belonging to the same customer.')}
+  const batch=input.printSettings?.batchPdfFiles;
+  if(batch&&(!input.calculations||Object.keys(batch).length!==input.files.length||input.files.some(id=>!Object.hasOwn(batch,id))))throw new Error('Provide print settings and calculations for every PDF in the batch.');
+  for(const id of input.files){const a=row<Attachment>('SELECT * FROM attachments WHERE id=?',id);if(!a||a.status!=='Ready'||a.customer_id!==input.customer)throw new Error('Select ready files belonging to the same customer.');if(batch&&a.mime!=='application/pdf')throw new Error('Select only PDFs for a PDF batch.')}
   let photoSnapshot:unknown;
   const photoOptions=input.printSettings;
   if(photoOptions&&Object.keys(photoOptions.photoItems??{}).length){
@@ -140,7 +154,8 @@ function createOrder(input:Input<'order'>){
     if(options.copies!==input.copies||options.paper!==input.paper||options.colour!==input.colour)throw new Error('Order settings must match the saved print configuration.');
     for(const item of calculations){
       const settings=item.settings;
-      if(settings.copies!==(options.fileCopies?.[item.id]??options.copies)||settings.paper!==options.paper||settings.pagesPerSide!==(options.nup??1)||settings.duplex!==options.duplex||settings.imposition!==(options.booklet?'booklet':options.poster?.enabled?'poster':'ordinary')||(options.booklet&&settings.signaturePages!==options.signaturePages))throw new Error('Calculated settings must match the saved print configuration.');
+      const fileOptions=batch?.[item.id]??options;
+      if(settings.copies!==(batch?fileOptions.copies:options.fileCopies?.[item.id]??options.copies)||settings.paper!==fileOptions.paper||settings.pagesPerSide!==(fileOptions.nup??1)||settings.duplex!==fileOptions.duplex||settings.imposition!==(fileOptions.booklet?'booklet':fileOptions.poster?.enabled?'poster':'ordinary')||(fileOptions.booklet&&settings.signaturePages!==fileOptions.signaturePages))throw new Error('Calculated settings must match the saved print configuration.');
     }
   }
   const estimate=calculations?calculateBulk(calculations.map(item=>({...item,customer:input.customer}))):undefined;
@@ -150,7 +165,8 @@ function createOrder(input:Input<'order'>){
   run('INSERT INTO print_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)',id,input.customer,'New',input.copies,input.paper,+input.colour,total,now());
   for(const file of input.files)run('INSERT INTO print_job_files VALUES (?,?)',id,file);
   if(calculations)for(const item of calculations)run('INSERT INTO print_calculations VALUES (?,?,?,?,?)',id,item.id,JSON.stringify(item.settings),JSON.stringify(estimate!.files.find(file=>file.id===item.id)!.calculation),now());
-  if(input.printSettings)run('INSERT INTO print_order_config VALUES (?,?)',id,JSON.stringify(input.printSettings));
+  if(input.printSettings)run('INSERT INTO print_order_config VALUES (?,?)',id,JSON.stringify({...input.printSettings,
+    orderAdjustments:calculations&&(input.charge||input.discount)?{charge:input.charge,discount:input.discount}:undefined}));
   if(photoSnapshot)store.save('photoLayout:'+id,photoSnapshot);
   store.audit('Order created',id);queueMicrotask(()=>void automation({id,jobId:id,kind:'order-created',customer:input.customer}));return id;
 }
@@ -244,7 +260,10 @@ function matches(rule:Rule,event:Event){
   return rule.enabled&&(rule.trigger===event.kind||(rule.trigger==='keyword'&&event.kind==='message'&&!!rule.keyword&&event.text?.toLowerCase().includes(rule.keyword.toLowerCase())));
 }
 async function automation(event:Event){
-  for(const rule of snapshot().rules.filter(rule=>matches(rule,event))){
+  const matching=snapshot().rules.filter(rule=>matches(rule,event));
+  const customPickup=event.kind==='pickup'&&matching.some(rule=>rule.id!=='default-pickup'&&rule.actions.includes('reply'));
+  for(const rule of matching){
+    if(customPickup&&rule.id==='default-pickup')continue;
     const eventKey=event.kind+':'+event.id;
     const reservation=run("INSERT OR IGNORE INTO automation_executions VALUES (?,?,'Running',?)",rule.id,eventKey,now());
     if(!reservation.changes)continue;
@@ -262,7 +281,12 @@ async function automation(event:Event){
         if(action==='reply'){
           if(!event.customer||!rule.text)throw new Error('A customer and reply text are required.');
           const order=event.jobId?job(event.jobId):undefined;
-          const text=rule.text.replaceAll('{job_id}',order?.id??'').replaceAll('{total_amount}',((order?.total??0)/100).toFixed(2));
+          const values:Record<string,string>={
+            job_id:order?.id??'',total_amount:((order?.total??0)/100).toFixed(2),
+            customer_name:row<Customer>('SELECT name FROM customers WHERE id=?',event.customer)?.name??'',
+            shop_name:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect'
+          };
+          const text=rule.text.replace(/\{(job_id|total_amount|customer_name|shop_name)\}/g,(_,key:string)=>values[key]);
           if((rule.debounceSeconds??0)>0){
             const account=web?.account??adapter?.config.phoneId;if(!account)throw new Error('Connect WhatsApp before scheduling automatic replies.');
             const pending=event.jobId?undefined:row<{id:string}>("SELECT id FROM notification_outbox WHERE rule_id=? AND customer_id=? AND account_id=? AND status='Pending' AND due>? LIMIT 1",rule.id,event.customer,account,Date.now());
@@ -333,22 +357,44 @@ async function syncChatDocuments({id}:Input<'webChatSync'>){
   const {messages,partial}=await current.syncChat(aliases,customer.phone);
   if(web!==current||connection.status!=='Connected')throw new Error('WhatsApp Web disconnected while loading documents.');
   store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],[],true)});
+  const documents=rows<{id:string}>(
+    "SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.account_id=? AND a.customer_id=? AND a.status='Available to download' ORDER BY a.created DESC LIMIT 20",
+    current.account,id);
+  changed();
+  void (async()=>{
+    for(const document of documents){
+      if(web!==current||connection.status!=='Connected')break;
+      await receiveMedia(document.id).catch(()=>{});
+    }
+  })();
   return {messages:messages.length,documents:messages.filter(message=>message.file).length,partial};
 }
-async function syncWebChats(){
+async function syncWebChats(onConnect=false){
   const current=web;
   if(!current||connection.status!=='Connected')throw new Error('Link WhatsApp Web before syncing chats.');
   if(syncingWeb===current)return;
   syncingWeb=current;
   connection={...connection,sync:'Syncing recent chats…'};changed();
-  try{
-    const result=await current.syncHistory(messages=>{
+  const sync=()=>current.syncHistory(messages=>{
       if(web!==current)return;
       store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],[],true)});
       changed();
-    });
+  });
+  try{
+    let result;
+    if(onConnect){
+      result=await sync().catch(()=>undefined);
+      if(!result?.imported){
+        await new Promise(resolve=>setTimeout(resolve,1500));
+        if(web!==current||connection.status!=='Connected')return;
+        result=await sync();
+      }
+    }else result=await sync();
     if(web===current&&connection.status==='Connected'){
-      connection={...connection,sync:result.chats?('Recent chats synced'+(result.failed?' · Some history could not be loaded':'')):'No direct chats found on WhatsApp Web'};
+      const sync=result.imported
+        ?'Recent chats synced'+(result.failed?' · Some history could not be loaded':'')
+        :result.chats?'No messages returned yet. Try Sync recent chats again.':'No direct chats found on WhatsApp Web';
+      connection={...connection,sync};
     }
   }catch{
     if(web===current)connection={...connection,sync:'Chat sync failed. Try Sync recent chats again.'};
@@ -357,30 +403,69 @@ async function syncWebChats(){
     changed();
   }
 }
-async function connectWeb(){
+async function connectWeb(_input:null=null,automatic=false){
   if(cloudTransition)throw new Error('Wait for Cloud API verification to finish.');
   if(adapter)throw new Error('Log out of the Cloud API connection before linking WhatsApp Web.');
-  if(webTransition||connection.mode==='web'&&['Connecting','Scan QR','Linking','Connected'].includes(connection.status))return;
+  if(webTransition||connection.status==='Connected')return;
+  if(!automatic)webRetryAttempt=0;
   if(webRetry){clearTimeout(webRetry);webRetry=undefined}
+  const operation=++webOperation;
   webTransition=true;
+  let previous:WebAdapter|undefined;
   try{
-    const previous=web;web=undefined;
+    previous=web;web=undefined;stoppingWeb=previous;
     if(previous)await previous.stop();
+    if(operation!==webOperation||shuttingDown)return;
+    stoppingWeb=undefined;
     web=undefined;
-    connection={status:'Connecting',mode:'web',phone:'',webhook:false};changed();
+    connection={status:'Starting Engine',mode:'web',phone:'',webhook:false};changed();
     const next=new WebAdapter(root,{
-      qr(image){if(web===next){connection={...connection,status:'Scan QR',qr:image,detail:undefined};changed()}},
-      authenticated(){if(web===next){connection={...connection,status:'Linking',qr:undefined};changed()}},
+      qrPending(info){
+        if(web===next){
+          connection={...connection,status:'Waiting for Fresh QR',qr:undefined,qrClientId:info.clientId,qrGeneratedAt:info.generatedAt,detail:undefined};
+          changed();
+        }
+      },
+      qr(image,info){
+        if(web===next&&connection.qrClientId===info.clientId&&connection.qrGeneratedAt===info.generatedAt){
+          connection={...connection,status:'QR Ready',qr:image,detail:undefined};
+          changed();
+        }
+      },
+      qrExpired(info){
+        if(web===next&&connection.qrClientId===info.clientId&&connection.qrGeneratedAt===info.generatedAt){
+          connection={...connection,status:'QR Expired',qr:undefined,detail:'This QR code is no longer fresh. Restart WhatsApp Engine to request a new code.'};
+          changed();
+        }
+      },
+      authenticated(){
+        if(web===next){
+          connection={...connection,status:'Authenticating',qr:undefined,qrClientId:undefined,qrGeneratedAt:undefined,detail:undefined};
+          changed();
+        }
+      },
       ready(account,phone){
         if(web!==next)return;
         run('INSERT INTO whatsapp_accounts VALUES (?,?) ON CONFLICT(id) DO UPDATE SET phone=excluded.phone',account,phone);
         webRetryAttempt=0;
         if(webRetry){clearTimeout(webRetry);webRetry=undefined}
         connection={status:'Connected',mode:'web',phone,webhook:false};changed();
-        void syncWebChats();
+        void syncWebChats(true);
         for(const a of rows<{id:string}>("SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.status='Pending' AND m.account_id=? LIMIT 20",account))void receiveMedia(a.id).catch(()=>{});
       },
-      offline(detail){if(web===next){connection={...connection,status:'Offline',qr:undefined,detail};changed();retryWeb()}},
+      offline(detail,retry=false){
+        if(web===next){
+          connection={...connection,status:'Connection Failed',qr:undefined,qrClientId:undefined,qrGeneratedAt:undefined,detail};
+          changed();
+          if(retry)retryWeb();
+        }
+      },
+      progress(status){
+        if(web===next&&connection.status!=='Connected'&&connection.status!=='Connection Failed'){
+          connection={...connection,status,detail:undefined};changed();
+        }
+      },
+      diagnostic(event,detail){store.audit('WhatsApp '+event,detail.slice(0,1800));changed()},
       message(info){
         if(web!==next)return;
         const events:Event[]=[];const imports:string[]=[];
@@ -391,19 +476,26 @@ async function connectWeb(){
     });
     web=next;
     store.save('whatsappProvider','web');
-    void next.start().catch(async(error:unknown)=>{
-      if(web!==next)return;
+    try{await next.start()}catch(error){
+      if(web!==next||operation!==webOperation)return;
       const reason=error instanceof Error?error.message:String(error);
       if(process.env.BLOOMCONNECT_WEB_SMOKE==='1')console.error(reason);
-      const code=reason.match(/net::(ERR_[A-Z_]+)/)?.[1];
-      connection={status:'Offline',mode:'web',phone:'',webhook:false,detail:'WhatsApp Web could not start. Check your internet and browser, then reconnect.'+(code?' ('+code+')':'')};changed();
-      await next.stop();
-      if(web===next)retryWeb();
-    });
+      const detail=reason.replace(/https?:\/\/[^\s?#,]+(?:\?[^\s,]*)?/g,'[url]').replace(/[\r\n\t]+/g,' ').slice(0,500);
+      connection={status:'Connection Failed',mode:'web',phone:'',webhook:false,detail:'WhatsApp Web could not start: '+(detail||'Unknown startup error.')};changed();
+      try{await next.stop()}catch(stopError){
+        const stopDetail=stopError instanceof Error?stopError.message.replace(/[\r\n\t]+/g,' ').slice(0,240):'Unknown shutdown error.';
+        connection={...connection,detail:connection.detail+' Browser shutdown also failed: '+stopDetail};changed();
+      }
+    }
   }catch(error){
-    connection={status:'Offline',mode:'web',phone:'',webhook:false,detail:error instanceof Error?error.message:'WhatsApp Web unavailable.'};changed();
+    if(operation===webOperation){
+      if(previous&&!web)web=previous;
+      connection={status:'Connection Failed',mode:'web',phone:'',webhook:false,detail:error instanceof Error?error.message:'WhatsApp Web unavailable.'};changed();
+    }
     throw error;
-  }finally{webTransition=false}
+  }finally{
+    if(operation===webOperation){stoppingWeb=undefined;webTransition=false}
+  }
 }
 function updateDelivery(account:string,id:string,status:string){
   const ranks:Record<string,number>={accepted:0,sent:1,delivered:2,read:3,failed:2};
@@ -479,6 +571,31 @@ async function probe(){
 setInterval(()=>void probe(),30000).unref();
 type HandlerMap={ [K in Operation]?: (input:Input<K>)=>unknown };
 const handlers:HandlerMap={
+  async importStudioPrint({name,bytes}:Input<'importStudioPrint'>){
+    const buffer=Buffer.from(bytes);
+    if(buffer.subarray(0,5).toString()!=='%PDF-')throw new Error('Prepare a PDF before opening print settings.');
+    const hash=createHash('sha256').update(buffer).digest('hex');
+    const existing=row<{id:string}>("SELECT id FROM attachments WHERE customer_id IS NULL AND hash=? AND status='Ready' AND mime='application/pdf'",hash);
+    if(existing)return existing.id;
+    const id=randomUUID();
+    const filename=basename(name).replace(/[^\p{L}\p{N} ._-]/gu,'_').replace(/[. ]+$/,'').slice(0,176)||'PDF Studio output';
+    run("INSERT INTO attachments (id,customer_id,name,status,created) VALUES (?,NULL,?,'Pending',?)",id,filename+'.pdf',now());
+    try{await saveMedia(id,buffer);return id}
+    catch(error){run("UPDATE attachments SET status='Failed' WHERE id=?",id);throw error}
+  },
+  async confirmPrintSubmissions({id,entries}:Input<'confirmPrintSubmissions'>){
+    const order=store.atomic(()=>{
+      const order=job(id);
+      const pending=rows<{id:string;status:string}>("SELECT id,status FROM print_queue WHERE job_id=? AND status IN ('Printing','Submitted','Unconfirmed')",id);
+      const expected=new Set(entries);
+      if(pending.some(entry=>entry.status==='Printing'))throw new Error('Wait for the order to finish sending to the printer.');
+      if(pending.length!==expected.size||pending.some(entry=>!expected.has(entry.id)))throw new Error('The print queue changed. Refresh and check the order before confirming.');
+      run("UPDATE print_queue SET status='Completed' WHERE job_id=? AND status IN ('Submitted','Unconfirmed')",id);
+      store.audit('Print queue status',id+' - '+pending.length+' submissions confirmed');
+      return order;
+    });
+    if(allFilesConfirmed(id))await automation({id,jobId:id,kind:'print-completed',customer:order.customer_id});
+  },
   notificationLog(){return rows<{id:string}>('SELECT n.id,n.rule_id,n.customer_id,n.event_key,n.status,n.attempts,n.error,n.created,m.status AS delivery_status FROM notification_outbox n LEFT JOIN messages m ON m.id=n.message_id ORDER BY n.created DESC LIMIT 100').map(n=>({...n,sendAttempts:rows('SELECT attempted,result,error FROM notification_attempts WHERE notification_id=? ORDER BY id',n.id)}))},
   printEstimate:calculatePrint,
   printPresets(){return {presets:store.setting('printPresets')??defaultPresets(),defaultId:store.setting('defaultPrintPreset')}},
@@ -490,7 +607,7 @@ const handlers:HandlerMap={
   deletePricingRule({id}){const values=store.setting<{id:string}[]>('printPricingRules')??[];store.save('printPricingRules',values.filter(p=>p.id!==id))},
   snapshot,setup(input){store.atomic(()=>{store.save('shop',input);run('INSERT INTO shops VALUES (1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name',input.shop);store.audit('Settings saved',input.shop)})},
   webConnect:connectWeb,
-  webSync:syncWebChats,
+  webSync:()=>syncWebChats(),
   webChatSync:syncChatDocuments,
   async connect(input){
     if(web||webTransition)throw new Error('Log out of the WhatsApp Web connection first.');
@@ -505,21 +622,32 @@ const handlers:HandlerMap={
     }finally{cloudTransition=false}
   },
   async logout(){
-    if(webTransition||cloudTransition)throw new Error('Wait for the connection to finish starting.');
+    if(cloudTransition||(webTransition&&!web&&!stoppingWeb))throw new Error('Wait for the connection to finish starting.');
     if(webRetry){clearTimeout(webRetry);webRetry=undefined}
     webRetryAttempt=0;
-    const previous=web;web=undefined;adapter=undefined;
-    store.save('whatsappProvider',null);
-    connection={status:'Disconnected',phone:'',webhook:false};changed();
-    if(previous){
-      webTransition=true;
-      try{await previous.stop(true)}
-      finally{webTransition=false}
-    }
+    const previous=web??stoppingWeb,previousCloud=adapter,wasWeb=connection.mode==='web'||!!previous;
+    const operation=++webOperation;
+    web=undefined;stoppingWeb=undefined;adapter=undefined;webTransition=true;
+    connection={status:'Logging Out',...(previous||wasWeb?{mode:'web' as const}:{}),phone:'',webhook:false};changed();
+    try{
+      store.save('whatsappProvider',null);
+      const result=previous?await previous.stop(true):undefined;
+      if(operation!==webOperation)return;
+      connection={status:'Disconnected',phone:'',webhook:false,...(result?.warning?{mode:'web' as const,detail:result.warning}:{})};
+    }catch(error){
+      if(!previous&&previousCloud)adapter=previousCloud;
+      const detail=error instanceof Error?error.message.replace(/[\r\n\t]+/g,' ').slice(0,200):'Unknown logout error.';
+      connection={status:'Connection Failed',...(previous||wasWeb?{mode:'web' as const}:{}),phone:'',webhook:false,detail:'WhatsApp logout could not finish: '+detail};
+      throw error;
+    }finally{if(operation===webOperation){webTransition=false;changed()}}
   },
   customer(input){const phone=input.phone.replace(/^\+/,'');if(input.id){const c=row<Customer>('SELECT * FROM customers WHERE id=?',input.id);if(!c)throw new Error('Customer not found.');if(c.phone!==phone&&row('SELECT id FROM messages WHERE customer_id=?',c.id))throw new Error('The WhatsApp number is linked to this message history.');run('UPDATE customers SET name=?,phone=?,notes=?,tag=? WHERE id=?',input.name,phone,input.notes,input.tag,c.id)}
     else run('INSERT INTO customers VALUES (?,?,?,?,?,?,?)',randomUUID(),input.name,phone,input.notes,input.tag,now(),now());store.audit('Customer saved',input.name)},
-  read({id}){run('UPDATE messages SET unread=0 WHERE customer_id=?',id)},
+  read({id}){
+    const account=web?.account||adapter?.config.phoneId;
+    if(account)run('UPDATE messages SET unread=0 WHERE customer_id=? AND account_id=?',id,account);
+    else run('UPDATE messages SET unread=0 WHERE customer_id=?',id);
+  },
   retryMedia:({id})=>receiveMedia(id),
   order:input=>store.atomic(()=>createOrder(input)),
   quote({id,total,reason}){store.atomic(()=>{const prior=job(id);if(total<prior.paid)throw new Error('The total cannot be below the amount already paid.');
@@ -620,7 +748,19 @@ const handlers:HandlerMap={
     const kind=eventByStage[status];
     if(kind)await automation({id,jobId:id,kind,customer:previous.customer_id});
   },
-  async payment({id,amount,method}){const paid=store.atomic(()=>{const order=job(id);if(amount>order.total-order.paid)throw new Error('Amount exceeds the outstanding balance.');const payment=randomUUID();run('INSERT INTO payments VALUES (?,?,?,?,?)',payment,id,amount,method,now());run('INSERT INTO receipts VALUES (?,?)',payment,now());store.audit('Payment recorded',id);return {...order,paid:order.paid+amount}});if(paid.paid===paid.total)await automation({id,jobId:id,kind:'payment-completed',customer:paid.customer_id})},
+  async payment({id,amount,method}){
+    const paid=store.atomic(()=>{
+      const order=job(id);
+      if(order.status==='Cancelled')throw new Error('Payments cannot be recorded for a cancelled order.');
+      if(amount>order.total-order.paid)throw new Error('Amount exceeds the outstanding balance.');
+      const payment=randomUUID();
+      run('INSERT INTO payments VALUES (?,?,?,?,?)',payment,id,amount,method,now());
+      run('INSERT INTO receipts VALUES (?,?)',payment,now());
+      store.audit('Payment recorded',id);
+      return {...order,paid:order.paid+amount};
+    });
+    if(paid.paid===paid.total)await automation({id,jobId:id,kind:'payment-completed',customer:paid.customer_id});
+  },
   reply:({id,text})=>reply(id,text),
   rule(input){const rule={...input,id:input.id??randomUUID()};if(rule.trigger==='keyword'&&!rule.keyword.trim())throw new Error('Enter a keyword.');
     if(rule.actions.includes('order')&&!['pdf','image','document'].includes(rule.trigger))throw new Error('Create order requires a file trigger.');
@@ -640,7 +780,29 @@ const internal:Record<string,(input:never)=>unknown>={
   }return count},
   async getPreview({id}:{id:string}){const a=readyFile(id);return {mime:a.mime,bytes:await readFile(join(mediaDir,a.path))}},
   printable({id}:{id:string}){job(id);return printFiles(id).map(id=>{const a=readyFile(id);return {mime:a.mime,path:join(mediaDir,a.path),name:a.name,id}})},
-  printStart(input:Input<"print">){const {id,printer}=input;job(id);if(input.fileSelection&&(new Set(input.fileSelection).size!==input.fileSelection.length||input.fileSelection.some(file=>!printFiles(id).includes(file))))throw new Error('Print selected files from this order only.');return store.atomic(()=>{if(row("SELECT id FROM print_queue WHERE job_id=? AND status IN ('Printing','Submitted','Unconfirmed')",id))throw new Error('Confirm or close the existing printer submission before printing this order again.');const entry=randomUUID();run("INSERT INTO print_queue (id,job_id,printer,status,created,settings) VALUES (?,?,?,'Printing',?,?)",entry,id,printer,now(),JSON.stringify({...input,fileSelection:input.fileSelection??printFiles(id)}));return entry})},
+  printStart(input:Input<"print">){return store.atomic(()=>{
+    const {id,printer}=input;
+    if(job(id).status==='Cancelled')throw new Error('Reopen the cancelled order before printing.');
+    const files=printFiles(id),selection=input.fileSelection??files;
+    if(new Set(selection).size!==selection.length||selection.some(file=>!files.includes(file)))throw new Error('Print selected files from this order only.');
+    const config=row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',id);
+    const printConfig=JSON.parse(config?.settings??'null');
+    const batch=printConfig?.batchPdfFiles;
+    const mixed=!!printConfig?.pdfSettings&&Object.keys(printConfig.photoItems??{}).length>0&&files.some(file=>!printConfig.photoItems[file]);
+    if(batch){
+      const proposed=JSON.stringify(batchPdfFileSchema.parse(input));
+      if(selection.some(file=>JSON.stringify(batchPdfFileSchema.parse(batch[file]))!==proposed))throw new Error('Every PDF submission must match its billed settings.');
+    }
+    const pending=rows<{settings:string|null}>("SELECT settings FROM print_queue WHERE job_id=? AND status IN ('Printing','Submitted','Unconfirmed')",id);
+    if(pending.some(entry=>{
+      if(!batch&&!mixed)return true;
+      const submitted=JSON.parse(entry.settings??'null')?.fileSelection??files;
+      return selection.some(file=>submitted.includes(file));
+    }))throw new Error('Confirm or close the existing printer submission before printing this order again.');
+    const entry=randomUUID();
+    run("INSERT INTO print_queue (id,job_id,printer,status,created,settings) VALUES (?,?,?,'Printing',?,?)",entry,id,printer,now(),JSON.stringify({...input,fileSelection:selection}));
+    return entry;
+  })},
   async printFinish({id,error,partial,cancelled}:{id:string;error:string;partial:boolean;cancelled?:boolean}){
     const status=cancelled?'Cancelled':error?(partial?'Unconfirmed':'Failed'):'Submitted';
     const updated=run("UPDATE print_queue SET status=?,error=? WHERE id=? AND status='Printing'",status,error,id);
@@ -655,6 +817,13 @@ const internal:Record<string,(input:never)=>unknown>={
     run('UPDATE print_queue SET status=? WHERE id=?',status,id);store.audit('Print queue status',item.job_id+' · '+status);
     if(status==='Completed'&&allFilesConfirmed(item.job_id))await automation({id:item.job_id,jobId:item.job_id,kind:'print-completed',customer:job(item.job_id).customer_id})},
   receiptData({id}:{id:string}){const payment=row('SELECT p.* FROM payments p JOIN receipts r ON r.id=p.id WHERE p.id=?',id);if(!payment)throw new Error('Receipt not found.');return {payment,shop:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect'}},
+  billData({id}:{id:string}){
+    const order=job(id);
+    const customer=order.customer_id?row<{name:string}>('SELECT name FROM customers WHERE id=?',order.customer_id):undefined;
+    return {order,customer:customer?.name??'Walk-in',shop:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect',
+      files:printFiles(id).map(file=>row<{name:string}>('SELECT name FROM attachments WHERE id=?',file)?.name??'Document')};
+  },
+  attachmentData({id}:{id:string}){const file=readyFile(id);return {name:file.name,path:join(mediaDir,file.path)}},
   async saveBackup({path}:{path:string}){await mkdir(join(path,'documents'),{recursive:true});run('VACUUM INTO ?',join(path,'bloomconnect.sqlite'));try{for(const file of await readdir(mediaDir))if(/^[a-f0-9]{64}\./.test(file)&&['pdf','jpg','png','webp','tiff','heic',...officeExtensions].some(ext=>file.endsWith('.'+ext)))await copyFile(join(mediaDir,file),join(path,'documents',file))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}return true}
 };
 process.on('message',async(message:{id:number;operation:string;input:never})=>{
@@ -668,19 +837,34 @@ process.on('message',async(message:{id:number;operation:string;input:never})=>{
     const result=handler?await handler(message.input):await publicHandler!(schemas[operation].parse(message.input));
     process.send?.({id:message.id,result});
   }catch(error){const detail=error instanceof Error?error.message:'Operation failed.';process.send?.({id:message.id,error:detail.includes('UNIQUE constraint')?'This record already exists.':detail})}
-  finally{if(!['snapshot','getPreview','printable','receiptData','notificationLog','pricingRules','printPresets','scanPreview','cancelScan'].includes(message.operation))changed()}
+  finally{if(!['snapshot','getPreview','printable','receiptData','billData','attachmentData','notificationLog','pricingRules','printPresets','scanPreview','cancelScan'].includes(message.operation))changed()}
 });
 
 if(store.setting('whatsappProvider')==='web')void connectWeb().catch(()=>{});
 function shutdown(){
   if(shuttingDown)return;
   shuttingDown=true;
+  webOperation++;
   if(webRetry)clearTimeout(webRetry);
   server.close();
-  const connectionToStop=web;
+  const connectionToStop=web??stoppingWeb;
   web=undefined;
+  stoppingWeb=undefined;
   adapter=undefined;
-  setTimeout(()=>process.exit(0),5000).unref();
-  void (connectionToStop?.stop()??Promise.resolve()).finally(()=>process.exit(0));
+  const shutdownTimeout=setTimeout(()=>{
+    store.audit('Engine shutdown timeout','WhatsApp browser cleanup did not finish within 45 seconds.');
+    process.exit(1);
+  },45_000);
+  void (async()=>{
+    try{
+      await connectionToStop?.stop();
+      clearTimeout(shutdownTimeout);
+      process.exit(0);
+    }catch(error){
+      store.audit('Engine shutdown failed',error instanceof Error?error.message.slice(0,240):'Unknown shutdown error.');
+      clearTimeout(shutdownTimeout);
+      process.exit(1);
+    }
+  })();
 }
 process.on('disconnect',shutdown);

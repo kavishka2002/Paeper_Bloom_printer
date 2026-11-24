@@ -123,7 +123,7 @@ export function estimateTextSkew({data,width,height}:Raster){
  return best>base*1.2&&Math.abs(angle)<9?-angle:0;
 }
 
-export function cleanDocument(raster:Raster,s:ScanSettings){
+export function cleanDocument(raster:Raster,s:ScanSettings,channels:3|4=3,preserveInk=false){
  const {data,width,height}=raster;
  const cols=Math.max(2,Math.ceil(width/112)),rows=Math.max(2,Math.ceil(height/112));
  const backgrounds=new Float32Array(rows*cols*3);
@@ -132,20 +132,27 @@ export function cleanDocument(raster:Raster,s:ScanSettings){
   const x0=Math.floor(col*width/cols),x1=Math.ceil((col+1)*width/cols),y0=Math.floor(row*height/rows),y1=Math.ceil((row+1)*height/rows);
   const histogram=new Uint16Array(256);
   let samples=0;
-  for(let y=y0;y<y1;y+=3)for(let x=x0;x<x1;x+=3){histogram[luminance(data,(y*width+x)*3)]++;samples++}
+  for(let y=y0;y<y1;y+=3)for(let x=x0;x<x1;x+=3){
+   const i=(y*width+x)*channels;
+   if(channels===4&&!data[i+3])continue;
+   histogram[luminance(data,i)]++;samples++;
+  }
   let threshold=255,upper=255,found=histogram[255];
   while(upper>0&&found<samples*.20)found+=histogram[--upper];
   threshold=upper;
   while(threshold>0&&found<samples*.45)found+=histogram[--threshold];
   let red=0,green=0,blue=0,count=0;
   for(let y=y0;y<y1;y+=3)for(let x=x0;x<x1;x+=3){
-   const i=(y*width+x)*3;
+   const i=(y*width+x)*channels;
+   if(channels===4&&!data[i+3])continue;
    const value=luminance(data,i);
    if(value>=threshold&&value<=upper){red+=data[i];green+=data[i+1];blue+=data[i+2];count++}
   }
   const i=(row*cols+col)*3;
-  backgrounds[i]=Math.max(35,red/count);backgrounds[i+1]=Math.max(35,green/count);backgrounds[i+2]=Math.max(35,blue/count);
-  if(threshold>=brightest){brightest=threshold;globalRed=backgrounds[i];globalGreen=backgrounds[i+1];globalBlue=backgrounds[i+2]}
+  backgrounds[i]=count?Math.max(35,red/count):255;
+  backgrounds[i+1]=count?Math.max(35,green/count):255;
+  backgrounds[i+2]=count?Math.max(35,blue/count):255;
+  if(count&&threshold>=brightest){brightest=threshold;globalRed=backgrounds[i];globalGreen=backgrounds[i+1];globalBlue=backgrounds[i+2]}
  }
  const out=new Uint8ClampedArray(data.length);
  const white=s.white/100,shadow=s.shadow/100,contrast=1+s.contrast/100,threshold=1-(.08+s.threshold*.0028);
@@ -153,13 +160,24 @@ export function cleanDocument(raster:Raster,s:ScanSettings){
   const dy=clamp((y+.5)*rows/height-.5,0,rows-1),r=Math.floor(dy),r1=Math.min(r+1,rows-1),fy=dy-r;
   for(let x=0;x<width;x++){
    const dx=clamp((x+.5)*cols/width-.5,0,cols-1),c=Math.floor(dx),c1=Math.min(c+1,cols-1),fx=dx-c;
-   const i=(y*width+x)*3,a=(r*cols+c)*3,b=(r*cols+c1)*3,d=(r1*cols+c)*3,e=(r1*cols+c1)*3;
+   const i=(y*width+x)*channels,a=(r*cols+c)*3,b=(r*cols+c1)*3,d=(r1*cols+c)*3,e=(r1*cols+c1)*3;
+   if(channels===4){
+    out[i+3]=data[i+3];
+    if(!data[i+3])continue;
+   }
    const wa=(1-fx)*(1-fy)*shadow,wb=fx*(1-fy)*shadow,wd=(1-fx)*fy*shadow,we=fx*fy*shadow;
    const red=backgrounds[a]*wa+backgrounds[b]*wb+backgrounds[d]*wd+backgrounds[e]*we+globalRed*(1-shadow);
    const green=backgrounds[a+1]*wa+backgrounds[b+1]*wb+backgrounds[d+1]*wd+backgrounds[e+1]*we+globalGreen*(1-shadow);
    const blue=backgrounds[a+2]*wa+backgrounds[b+2]*wb+backgrounds[d+2]*wd+backgrounds[e+2]*we+globalBlue*(1-shadow);
    const paperGray=red*.299+green*.587+blue*.114;
    const level=luminance(data,i),ratio=level/Math.max(35,paperGray);
+   if(preserveInk){
+    // Lift pale paper while progressively protecting pixels darker than their surroundings.
+    const paperWeight=clamp(1-(paperGray-level)/55,0,1)**2;
+    const lift=Math.max(0,255-Math.max(level,paperGray))*white*paperWeight;
+    out[i]=data[i]+lift;out[i+1]=data[i+1]+lift;out[i+2]=data[i+2]+lift;
+    continue;
+   }
    if(s.mode==='bw'){
     const value=ratio+(s.brightness*.003)>=threshold?255:0;
     out[i]=value;out[i+1]=value;out[i+2]=value;continue;
@@ -176,11 +194,12 @@ export function cleanDocument(raster:Raster,s:ScanSettings){
   }
  }
  if(s.mode!=='bw'&&(s.denoise||s.sharpness)){
-  const source=new Uint8ClampedArray(out),stride=width*3;
+  const source=new Uint8ClampedArray(out),stride=width*channels;
   for(let y=1;y<height-1;y++)for(let x=1;x<width-1;x++){
-   const i=(y*width+x)*3;
+   const i=(y*width+x)*channels;
+   if(channels===4&&!data[i+3])continue;
    for(let ch=0;ch<3;ch++){
-    const p=i+ch,value=source[p],l=source[p-3],r=source[p+3],a=source[p-stride],b=source[p+stride];
+    const p=i+ch,value=source[p],l=source[p-channels],r=source[p+channels],a=source[p-stride],b=source[p+stride];
     const smooth=(l+r+a+b)/4;
     const detail=value-smooth;
     // Dampen low-amplitude noise and sharpen moderate edges only.

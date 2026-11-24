@@ -55,6 +55,38 @@ test('shadow normalization brightens paper while retaining dark strokes and colo
   assert.deepEqual(pixel(bw,190,121),[0,0,0]);
  }
 });
+test('document photo print cleanup lifts RGBA paper shadows and preserves ink and transparency',()=>{
+ const width=320,height=180,data=new Uint8Array(width*height*4);
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+  const paper=Math.round(115+x*.3);
+  data.set(x<8?[0,0,0,0]:x>90&&x<170&&y>78&&y<83?[24,25,26,255]:[paper,paper-7,paper-13,255],(y*width+x)*4);
+ }
+ const original=data.slice();
+ const result=cleanDocument({data,width,height},{...preset,white:90,contrast:0,shadow:100,denoise:0,sharpness:0},4);
+ const rgba=(x,y)=>[...result.data.slice((y*width+x)*4,(y*width+x)*4+4)];
+ assert.ok(rgba(55,40).slice(0,3).every(channel=>channel>225));
+ assert.ok(rgba(130,80).slice(0,3).every(channel=>channel<80));
+ assert.equal(rgba(2,40)[3],0);
+ assert.equal(rgba(55,40)[3],255);
+ assert.deepEqual(data,original);
+});
+
+test('photo print lightening brightens paper without clipping faint ink to white',()=>{
+ const width=120,height=120,data=new Uint8Array(width*height*4);
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+  const level=y===61&&x>30&&x<90?175:190;
+  data.set([level,level,level,255],(y*width+x)*4);
+ }
+ const settings={...preset,shadow:100,denoise:0,sharpness:0};
+ const light=white=>cleanDocument({data,width,height},{...settings,white},4,true).data;
+ const paper=(60*width+60)*4,ink=(61*width+60)*4;
+ const gentle=light(55),maximum=light(100);
+ assert.ok(gentle[paper]>190);
+ assert.ok(maximum[paper]>gentle[paper]);
+ assert.ok(maximum[paper]-maximum[ink]>=25);
+ assert.equal(maximum[ink+3],255);
+});
+
 test('combined scan PDF preserves page order and A4 orientation',async()=>{
  const {getDocument}=await import('pdfjs-dist/legacy/build/pdf.mjs');
  const portrait=raster(80,120,()=>[210,230,250]),landscape=raster(120,80,()=>[255,245,220]);

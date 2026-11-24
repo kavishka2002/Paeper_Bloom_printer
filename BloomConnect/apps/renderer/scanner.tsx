@@ -185,7 +185,7 @@ export function ScannerDialog({ids,onClose}:{ids:string[];onClose:()=>void}){
     const customer=data.attachments.find(file=>file.id===pages[0])?.customer_id??null;
     const colour=pages.some(id=>(settings[id]??defaults).mode==='color');
     const rates=await window.bloom.call('pricingRules',null);
-    const pricing=rates.find(rule=>rule.paper==='A4'&&rule.method==='ordinary'&&!rule.duplex&&(!rule.media||rule.media==='Default'))?.policy??documentPricing(data.settings!,'simplex');
+    const pricing=rates.find(rule=>rule.paper==='A4'&&rule.method==='ordinary'&&!rule.duplex&&(!rule.media||rule.media==='Default'))?.policy??documentPricing(data.settings!,'simplex','sheet','A4');
     const job=await window.bloom.call('order',{customer,files:[pdf],copies:1,paper:'A4',colour,price:0,discount:0,charge:0,
      calculations:[{id:pdf,settings:{documentPages:pages.length,copies:1,paper:'A4',mode:colour?'colour':'mono',pricing}}]});
     await refresh();setWorkspace({view:'Print Studio',job,photoStudio:false});onClose();

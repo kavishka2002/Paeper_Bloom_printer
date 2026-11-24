@@ -1,3 +1,4 @@
+import {duplexEdge} from './duplex';
 import {calculatePrint} from './calculation';
 import {normalizedSettings,type PrintSettings,type PrintSettingsInput} from './settings';
 import {paperDimensions} from './paper';
@@ -61,7 +62,7 @@ export function contentBox(s:PrintSettings,width:number,height:number):Box{
   if(box.width<=0||box.height<=0)throw new Error('Margins leave no printable area.');
   return box;
 }
-export function gridShape(s:PrintSettings,width:number,height:number):[number,number]{
+export function gridShape(s:Pick<PrintSettings,'nup'|'booklet'|'grid'>,width:number,height:number):[number,number]{
   if(s.booklet)return [2,1];
   if(s.grid)return [s.grid.columns,s.grid.rows];
   const defaults:Record<number,[number,number]>={1:[1,1],2:[1,2],4:[2,2],6:[2,3],8:[2,4],9:[3,3],16:[4,4]};
@@ -118,7 +119,7 @@ export function planDocument(raw:PrintSettingsInput,doc:DocumentInfo):DocumentPl
   const sides:PlannedSide[]=[];
   const add=(placements:Placement[],label?:string,photo=false)=>{
     const back=s.duplex!=='simplex'&&sides.length%2===1;
-    sides.push({file:doc.id,width,height,placements,ink:placements.length?placements.some(p=>p.colour)?'colour':'mono':'blank',back,turn:s.booklet&&back&&['longEdge','manualLongEdge'].includes(s.duplex),label,marks:!!s.poster?.marks||!!s.photo?.cutGuides,photo});
+    sides.push({file:doc.id,width,height,placements,ink:placements.length?placements.some(p=>p.colour)?'colour':'mono':'blank',back,turn:s.booklet&&back&&duplexEdge(s.duplex,width>height)==='long',label,marks:!!s.poster?.marks||!!s.photo?.cutGuides,photo});
   };
   let photoCount=0;
   if(isPhoto){
@@ -223,7 +224,8 @@ export function planPhotos(raw:PrintSettingsInput,docs:DocumentInfo[]):DocumentP
     continue;
    }
    if(s.photoGrid){
-    const {columns,rows}=s.photoGrid,slot=(photoCount-1)%(columns*rows);
+    const {columns,rows,capacity}=s.photoGrid;
+    const slot=(photoCount-1)%Math.min(capacity??rows*columns,rows*columns);
     if(slot===0)sheets.push({side:newSide(),free:[]});
     addPhoto(sheets[sheets.length-1].side,cellBox(slot,columns,rows,area,s.gapMm,s.order),doc,item,copy);
     continue;

@@ -1,10 +1,10 @@
 import {useState} from 'react';
-import {Activity,Archive,BookOpen,ChevronDown,ChevronRight,FileText,History,Inbox,LayoutDashboard,MessageSquare,PanelLeftClose,PanelLeftOpen,Printer,Settings,ShoppingBag,Users,Wallet,Workflow,Zap} from 'lucide-react';
+import {Activity,Archive,BookOpen,ChevronDown,ChevronRight,FilePenLine,FileText,History,Inbox,LayoutDashboard,MessageSquare,PanelLeftClose,PanelLeftOpen,Printer,Settings,ShoppingBag,Users,Wallet,Workflow,Zap} from 'lucide-react';
 import {Brand} from './setup';
 import {Badge} from './context';
 import {useWorkspace} from './state';
 export const groups=[
- {label:'Workspace',si:'වැඩ අවකාශය',items:[['Dashboard',LayoutDashboard,'මුල් පිටුව'],['WhatsApp',Inbox,'WhatsApp']]},
+ {label:'Workspace',si:'වැඩ අවකාශය',items:[['Dashboard',LayoutDashboard,'මුල් පිටුව'],['WhatsApp',Inbox,'WhatsApp'],['PDF Studio',FilePenLine,'PDF Studio']]},
  {label:'Print management',si:'මුද්‍රණය',items:[['Print Studio',Printer,'මුද්‍රණ සැකසුම්'],['Print Queue',BookOpen,'මුද්‍රණ පෝලිම'],['Orders',ShoppingBag,'ඇණවුම්'],['Print History',History,'මුද්‍රණ ඉතිහාසය']]},
  {label:'Customers & files',si:'පාරිභෝගිකයින් සහ ලේඛන',items:[['Customers',Users,'පාරිභෝගිකයින්'],['Documents',FileText,'ලේඛන']]},
  {label:'Business',si:'ව්‍යාපාරය',items:[['Payments',Wallet,'ගෙවීම්'],['Reports',Activity,'වාර්තා']]},

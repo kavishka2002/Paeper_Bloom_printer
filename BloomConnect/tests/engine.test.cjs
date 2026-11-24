@@ -5,10 +5,10 @@ const {mkdtemp,writeFile,readFile,rm}=require('node:fs/promises');
 const {tmpdir}=require('node:os');
 const {join,resolve}=require('node:path');
 const {buildSync}=require('esbuild');
-const helper=buildSync({stdin:{contents:"export {selectPages} from './packages/printing/layout'; export {signed} from './packages/whatsapp-adapters/cloud';",resolveDir:process.cwd()},write:false,bundle:true,platform:'node',format:'cjs'}).outputFiles[0].text;
+const helper=buildSync({stdin:{contents:"export {selectPages} from './packages/printing/layout'; export {signed} from './packages/whatsapp-adapters/cloud'; export {installWhatsAppAuthStateFallback,whatsappAuthStateFromPage,whatsappAccountIsReadyFromPage} from './packages/whatsapp-adapters/auth-state';",resolveDir:process.cwd()},write:false,bundle:true,platform:'node',format:'cjs'}).outputFiles[0].text;
 const sandbox={exports:{}};
 new Function('module','exports','require',helper)(sandbox,sandbox.exports,require);
-const {selectPages,signed}=sandbox.exports;
+const {selectPages,signed,installWhatsAppAuthStateFallback,whatsappAuthStateFromPage,whatsappAccountIsReadyFromPage}=sandbox.exports;
 test('page ranges are sorted, deduplicated and bounded',()=>{
  assert.deepEqual(selectPages('3, 1-3, 5',5),[1,2,3,5]);
  assert.throws(()=>selectPages('0',5));
@@ -23,8 +23,69 @@ test('webhook signature covers the exact raw request bytes',()=>{
  assert.equal(signed(Buffer.concat([raw,Buffer.from(' ')]),'secret',signature),false);
  assert.equal(signed(raw,'secret','sha256=f0'),false);
 });
-function start(root,fixture=false){
- const child=fork(resolve(process.env.BLOOMCONNECT_TEST_ENGINE??'dist/engine.cjs'),[root],{env:{...process.env,BLOOMCONNECT_TEST_WEBHOOK:'1'},execArgv:fixture?['--require',resolve('tests/'+(fixture==='web'?'web':'cloud')+'-fixture.cjs')]:[],serialization:'advanced',stdio:['ignore','ignore','inherit','ipc']});
+test('WhatsApp QR authentication supports the current login page when its socket model is missing',()=>{
+ const original=global.window;
+ try{
+  const serializedInstaller=new Function('return ('+installWhatsAppAuthStateFallback.toString()+')')();
+  const socketModel={};
+  global.window={require:name=>name==='WAWebSocketModel'?socketModel:name==='WAWebConnModel'?{Conn:{ref:'fixture-ref'}}:{}};
+  assert.equal(serializedInstaller(),true);
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:true,state:'UNPAIRED_IDLE'});
+  assert.equal(typeof socketModel.Socket.on,'function');
+  global.window={require:name=>name==='WAWebConnModel'?{Conn:{ref:'fixture-ref'}}:undefined};
+  assert.equal(serializedInstaller(),true);
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:true,state:'UNPAIRED_IDLE'});
+  assert.equal(typeof global.window.require('WAWebSocketModel').Socket.on,'function');
+  global.window={require:name=>name==='WAWebSocketModel'?{}:name==='WAWebConnModel'?{Conn:{ref:'fixture-ref'}}:{}};
+  assert.equal(installWhatsAppAuthStateFallback(),true);
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:true,state:'UNPAIRED_IDLE'});
+  global.window={require:name=>name==='WAWebSocketModel'?{}:name==='WAWebConnModel'?{Conn:{ref:null}}:{}};
+  assert.equal(whatsappAuthStateFromPage(),false);
+  global.window={require:name=>name==='WAWebSocketModel'?{Socket:{state:'OPEN'}}:{}};
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:false,state:'OPEN'});
+  let state='CLOSED',linked=false;
+  const connection={ref:'fresh-qr-reference'};
+  const socket={get state(){return state},set state(value){state=value},on(){return this}};
+  global.window={require:name=>name==='WAWebSocketModel'?{Socket:socket}:name==='WAWebConnModel'?{Conn:connection}:name==='WAWebUserPrefsMeUser'?{
+   getMaybeMePnUser:()=>linked?{_serialized:'account'}:undefined,
+   getMaybeMeLidUser:()=>undefined
+  }:{}};
+  assert.equal(installWhatsAppAuthStateFallback(),true);
+  assert.equal(socket.state,'UNPAIRED_IDLE');
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:true,state:'UNPAIRED_IDLE'});
+  connection.ref=undefined;state='OPENING';
+  assert.equal(socket.state,'OPENING');
+  linked=true;
+  assert.equal(socket.state,'CONNECTED');
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:false,state:'CONNECTED'});
+ }finally{
+  if(original===undefined)delete global.window;
+  else global.window=original;
+ }
+});
+test('WhatsApp QR auth state advances when a linked account appears',()=>{
+ const original=global.window;
+ try{
+  let linked=false;
+  const connection={ref:'fixture-ref'};
+  const socketModel={};
+  global.window={require:name=>name==='WAWebSocketModel'?socketModel:name==='WAWebConnModel'?{Conn:connection}:name==='WAWebUserPrefsMeUser'?{
+   getMaybeMePnUser:()=>linked?{_serialized:'account'}:undefined,
+   getMaybeMeLidUser:()=>undefined
+  }:{}};
+  assert.equal(installWhatsAppAuthStateFallback(),true);
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:true,state:'UNPAIRED_IDLE'});
+  assert.equal(whatsappAccountIsReadyFromPage(),false);
+  connection.ref=null;linked=true;
+  assert.deepEqual(whatsappAuthStateFromPage(),{need:false,state:'CONNECTED'});
+  assert.equal(whatsappAccountIsReadyFromPage(),true);
+ }finally{
+  if(original===undefined)delete global.window;
+  else global.window=original;
+ }
+});
+function start(root,fixture=false,extraEnv={}){
+ const child=fork(resolve(process.env.BLOOMCONNECT_TEST_ENGINE??'dist/engine.cjs'),[root],{env:{...process.env,...extraEnv,BLOOMCONNECT_TEST_WEBHOOK:'1'},execArgv:fixture?['--require',resolve('tests/'+(fixture==='web'?'web':'cloud')+'-fixture.cjs')]:[],serialization:'advanced',stdio:['ignore','ignore','inherit','ipc']});
  let next=0;
  return {call(operation,input){return new Promise((resolve,reject)=>{
   const id=++next;
@@ -69,6 +130,24 @@ test('engine validates inputs, imports and deduplicates, persists billing and cr
   assert.equal(before.jobs[0].paid,1000);
   assert.equal(before.jobs[0].total,2500);
   assert.equal(before.queue[0].status,'Completed');
+  const bill=await engine.call('billData',{id});
+  assert.equal(bill.order.total,2500);
+  assert.equal(bill.order.paid,1000);
+  assert.equal(bill.files.length,1);
+  assert.equal((await engine.call('attachmentData',{id:file})).name,bill.files[0]);
+  const defaults=await engine.call('printPresets',null);
+  const original=defaults.presets.find(item=>item.name==='A4 Colour');
+  await engine.call('savePrintPreset',{name:'Shop colour preset',settings:{...original.settings,printer:'TOSHIBA e-STUDIO257',copies:2}});
+  const preset=(await engine.call('printPresets',null)).presets.find(item=>item.name==='Shop colour preset');
+  await engine.call('setDefaultPrintPreset',{id:preset.id});
+  const savedPresets=await engine.call('printPresets',null);
+  assert.equal(savedPresets.defaultId,preset.id);
+  assert.equal(savedPresets.presets.find(item=>item.id===preset.id).settings.copies,2);
+  await engine.call('stage',{id,status:'Cancelled'});
+  await assert.rejects(engine.call('payment',{id,amount:100,method:'Cash'}),/cancelled order/);
+  await assert.rejects(engine.call('printStart',{id,printer:'Test queue'}),/cancelled order/);
+  assert.equal((await engine.call('snapshot',null)).payments.length,1);
+  await engine.call('stage',{id,status:'New'});
   assert.equal(await engine.call('saveBackup',{path:join(root,'backup')}),true);
   assert.equal((await readFile(join(root,'backup','bloomconnect.sqlite'))).subarray(0,15).toString(),'SQLite format 3');
   const validated=spawnSync(process.execPath,['scripts/validate-backup.cjs',join(root,'backup')],{encoding:'utf8'});
@@ -153,7 +232,7 @@ test('signed Cloud events produce one customer, media record, automatic order an
   await engine.call('confirmPrice',{id:eventOrder,total:2300});
   await engine.call('confirmPrice',{id:eventOrder,total:2300});
   const readyNotice='ඔබගේ ඇණවුම මුද්‍රණය කිරීමට සූදානම්. රැකියා අංකය: '+eventOrder;
-  const queuedNotice='ඔබගේ ඇණවුම මුද්‍රණ පෝලිමට එක් කර ඇත. රැකියා අංකය: '+eventOrder;
+  const queuedNotice='ඔබගේ ඇණවුම මුද්‍රණ පෝලිමට එක් කර ඇත.\nඇණවුම් අංකය: '+eventOrder;
   const completedNotice='ඔබගේ මුද්‍රණ කටයුතු අවසන් වී ඇත. රැකියා අංකය: '+eventOrder+'. මුළු මුදල: රු. 23.00';
   await engine.call('stage',{id:eventOrder,status:'Ready to Print'});
   await engine.call('stage',{id:eventOrder,status:'Processing'});
@@ -174,6 +253,18 @@ test('signed Cloud events produce one customer, media record, automatic order an
   const stageMessages=(await engine.call('snapshot',null)).messages;
   for(const text of ['Registered '+eventOrder,readyNotice,'Started '+eventOrder,queuedNotice,completedNotice,'Pickup '+eventOrder+': 23.00','Collected '+eventOrder,'Price '+eventOrder+': 23.00'])assert.equal(stageMessages.filter(m=>m.body===text).length,1);
   const eventLog=await engine.call('notificationLog',null);assert.ok(eventLog.filter(n=>n.rule_id.startsWith('event-')).every(n=>n.sendAttempts.length===1&&n.status==='Accepted'));
+  assert.equal(eventLog.some(item=>item.rule_id==='default-pickup'),false);
+  await engine.call('rule',{id:'event-pickup',name:'pickup',trigger:'pickup',keyword:'',actions:['reply'],text:'Pickup {job_id}: {total_amount}',debounceSeconds:0,enabled:false,graph:''});
+  const pickupOrder=await engine.call('order',{customer:state.customers[0].id,files:[state.attachments[0].id],copies:1,paper:'A4',colour:false,price:2300,discount:0,charge:0});
+  await assert.rejects(engine.call('stage',{id:pickupOrder,status:'Ready for Pickup'}),/Confirm physical printing/);
+  const pickupSubmission=await engine.call('printStart',{id:pickupOrder,printer:'Fixture only'});
+  await engine.call('printFinish',{id:pickupSubmission,error:'',partial:false});
+  await engine.call('queue',{id:pickupSubmission,status:'Completed'});
+  await engine.call('stage',{id:pickupOrder,status:'Ready for Pickup'});
+  const pickup=(await engine.call('snapshot',null)).messages.find(message=>message.body.startsWith('🎉 *ඔබගේ ඇණවුම සූදානම්!*')&&message.body.includes(pickupOrder));
+  assert.ok(pickup);
+  assert.ok(pickup.body.includes('ආයුබෝවන් '+state.customers[0].name+','));
+  assert.ok(pickup.body.endsWith('*'+state.settings.shop+'*'));
   await engine.call('reply',{id:state.customers[0].id,text:'Received.'});
   assert.equal((await engine.call('snapshot',null)).messages.at(-1).status,'accepted');
   const stale=JSON.parse(body);
@@ -201,8 +292,13 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   let state;
   for(let attempt=0;attempt<120;attempt++){
    state=await engine.call('snapshot',null);
-   if(!sawQR&&/^data:image\/png;base64,/.test(state.connection.qr??'')){
+   if(!sawQR&&state.connection.status==='QR Ready'&&/^data:image\/png;base64,/.test(state.connection.qr??'')){
     sawQR=true;
+    assert.ok(state.connection.qrClientId);
+    assert.ok(Number.isFinite(Date.parse(state.connection.qrGeneratedAt)));
+    const qrBytes=Buffer.from(state.connection.qr.split(',')[1],'base64');
+    const qrImage=await require('sharp')(qrBytes).metadata();
+    assert.deepEqual([qrImage.width,qrImage.height],[400,400]);
     await writeFile(join(root,'release-qr'),'Ready');
    }
    if(state.jobs.length&&state.messages.length===6)break;
@@ -236,10 +332,17 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   assert.equal(afterOutgoingDownload.attachments.find(file=>file.id===outgoingFile.id).status,'Ready');
   assert.equal(afterOutgoingDownload.jobs.length,1);
   const selected=await engine.call('webChatSync',{id:state.customers.find(c=>c.phone).id});
-  assert.deepEqual(selected,{messages:1,documents:1,partial:false});
+  assert.deepEqual(selected,{messages:2,documents:2,partial:true});
   await engine.call('webChatSync',{id:state.customers.find(c=>c.phone).id});
-  const afterSelectedSync=await engine.call('snapshot',null);
+  let afterSelectedSync;
+  for(let attempt=0;attempt<40;attempt++){
+   afterSelectedSync=await engine.call('snapshot',null);
+   if(['deep-document','deep-image'].every(id=>afterSelectedSync.attachments.some(file=>file.message_id===id&&file.status==='Ready')))break;
+   await new Promise(resolve=>setTimeout(resolve,25));
+  }
   assert.equal(afterSelectedSync.attachments.filter(file=>file.name==='older-notes.pdf').length,1);
+  assert.equal(afterSelectedSync.attachments.find(file=>file.message_id==='deep-document').mime,'application/pdf');
+  assert.equal(afterSelectedSync.attachments.find(file=>file.message_id==='deep-image').mime,'image/png');
   assert.equal(afterSelectedSync.messages.some(message=>message.kind==='notification_template'),false);
   assert.equal(afterSelectedSync.jobs.length,1);
   await engine.call('rule',{name:'Old chat automatic reply',trigger:'pickup',keyword:'',actions:['reply'],text:'Ready.',enabled:true,graph:''});
@@ -254,34 +357,236 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   assert.equal(afterAutomation.activity.some(a=>a.kind==='Automation failed'&&a.detail==='Old chat automatic reply'),true);
   await engine.call('reply',{id:state.customers.find(c=>c.phone).id,text:'Received.'});
   assert.equal((await engine.call('snapshot',null)).messages.at(-1).direction,'outgoing');
+  await writeFile(join(root,'shop-data-marker'),'preserve');
   await engine.call('logout',null);
   assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');
+  const lifecycle=(await readFile(join(root,'web-lifecycle.log'),'utf8')).split(/\r?\n/);
+  assert.ok(lifecycle.indexOf('logout:1')<lifecycle.indexOf('destroy:1'));
+  assert.ok(lifecycle.indexOf('logout:1')<lifecycle.indexOf('browser-close:1'));
+  assert.ok(lifecycle.indexOf('browser-close:1')<lifecycle.indexOf('destroy:1'));
+  assert.ok(lifecycle.indexOf('destroy:1')<lifecycle.indexOf('auth-clear:1'));
+  assert.equal(await readFile(join(root,'shop-data-marker'),'utf8'),'preserve');
+  assert.equal(require('node:fs').existsSync(join(root,'whatsapp-web','session')),false);
+  await rm(join(root,'release-qr'),{force:true});
+  await writeFile(join(root,'switch-account'),'switch');
+  await engine.call('webConnect',null);
+  let newQr;
+  for(let attempt=0;attempt<120;attempt++){
+   newQr=await engine.call('snapshot',null);
+   if(newQr.connection.status==='QR Ready'&&newQr.connection.qr)break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(newQr.connection.status,'QR Ready');
+  assert.ok(newQr.connection.qr);
+  await writeFile(join(root,'release-qr'),'Ready');
+  let switched;
+  for(let attempt=0;attempt<240;attempt++){
+   switched=await engine.call('snapshot',null);
+   if(switched.connection.status==='Connected')break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(switched.connection.phone,'94710000002');
+  assert.deepEqual(switched.messages.map(message=>message.id),['second-account-message']);
+  assert.ok(switched.customers.some(customer=>customer.phone==='94710000000'));
+  assert.equal(switched.jobs.length,1);
+  await engine.call('logout',null);
+  const archived=await engine.call('snapshot',null);
+  assert.ok(archived.messages.some(message=>message.id==='second-account-message'));
+  assert.ok(archived.messages.some(message=>message.id==='fixture-old-out'));
+  assert.equal(archived.jobs.length,1);
  }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
 });
 
+test('WhatsApp does not display a canvas QR when the library QR hook fails',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-auth-recovery-'));
+ const engine=start(root,'web',{
+  BLOOMCONNECT_TEST_WEB_NO_QR_EVENT:'1',
+  BLOOMCONNECT_TEST_WEB_COMPAT_INJECT_ERROR:'1'
+ });
+ try{
+  await engine.call('webConnect',null);
+  let state;
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='Connection Failed')break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'Connection Failed');
+  assert.equal(state.connection.qr,undefined);
+  assert.match(state.connection.detail,/fixture QR hook changed/);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp shows the native login QR and initializes the account after leaving the login page',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-native-login-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_WEB_NATIVE_LOGIN:'1'});
+ try{
+  await engine.call('webConnect',null);
+  const waitForStatus=async status=>{
+   for(let attempt=0;attempt<100;attempt++){
+    const {connection}=await engine.call('snapshot',null);
+    if(connection.status===status)return connection;
+    await new Promise(resolve=>setTimeout(resolve,35));
+   }
+   assert.fail('WhatsApp did not reach '+status);
+  };
+  const login=await waitForStatus('QR Ready');
+  assert.equal(login.qr,'data:image/png;base64,fixture-native-qr');
+  assert.doesNotMatch(await readFile(join(root,'web-lifecycle.log'),'utf8'),/inject-/);
+  await writeFile(join(root,'release-qr'),'linked');
+  const connected=await waitForStatus('Connected');
+  assert.equal(connected.phone,'94710000001');
+  assert.equal(connected.qr,undefined);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp refreshes only on a new client QR event, expires the displayed code, and restarts with a new client',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-qr-refresh-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_QR_TTL_MS:'1000'});
+ try{
+  await engine.call('webConnect',null);
+  let state;
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='QR Ready'&&state.connection.qr)break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'QR Ready');
+  const firstQr=state.connection.qr;
+  const firstClient=state.connection.qrClientId;
+  const firstGeneration=state.connection.qrGeneratedAt;
+  await writeFile(join(root,'emit-refreshed-qr'),'refresh');
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='QR Ready'&&state.connection.qrGeneratedAt!==firstGeneration)break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'QR Ready');
+  assert.notEqual(state.connection.qr,firstQr);
+  assert.equal(state.connection.qrClientId,firstClient);
+  assert.notEqual(state.connection.qrGeneratedAt,firstGeneration);
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='QR Expired')break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'QR Expired');
+  assert.equal(state.connection.qr,undefined);
+  assert.match(state.connection.detail,/no longer fresh/);
+  await engine.call('webConnect',null);
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='QR Ready'&&state.connection.qr&&state.connection.qrClientId!==firstClient)break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'QR Ready');
+  assert.ok(state.connection.qr);
+  assert.notEqual(state.connection.qrClientId,firstClient);
+  assert.equal((await engine.call('snapshot',null)).activity.some(entry=>entry.kind==='WhatsApp QR event received'&&entry.detail.includes('synthetic-')),false);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp logout waits for an in-flight browser launch before clearing the session',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-start-race-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_WEB_LAUNCH_DELAY:'100'});
+ try{
+  const starting=engine.call('webConnect',null);
+  await new Promise(resolve=>setTimeout(resolve,10));
+  await engine.call('webConnect',null);
+  await engine.call('logout',null);
+  await starting;
+  assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');
+  const lifecycle=(await readFile(join(root,'web-lifecycle.log'),'utf8')).split(/\r?\n/);
+  assert.equal(lifecycle.filter(event=>event.startsWith('launch:')).length,1);
+  assert.ok(lifecycle.indexOf('browser-close:0')<lifecycle.indexOf('auth-clear:0'));
+  assert.equal(lifecycle.some(event=>event.startsWith('initialize:')),false);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp detached-frame logout still closes the browser and clears only its auth session',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-detached-logout-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_WEB_LOGOUT_ERROR:'Attempted to use detached Frame'});
+ try{
+  await writeFile(join(root,'release-qr'),'Ready');
+  await engine.call('webConnect',null);
+  let state;
+  for(let attempt=0;attempt<120;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='Connected')break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.equal(state.connection.status,'Connected');
+  await engine.call('logout',null);
+  state=await engine.call('snapshot',null);
+  assert.equal(state.connection.status,'Disconnected');
+  assert.match(state.connection.detail,/did not confirm remote logout/);
+  assert.equal(require('node:fs').existsSync(join(root,'whatsapp-web','session')),false);
+  const lifecycle=(await readFile(join(root,'web-lifecycle.log'),'utf8')).split(/\r?\n/);
+  assert.ok(lifecycle.indexOf('logout:1')<lifecycle.indexOf('browser-close:1'));
+  assert.ok(lifecycle.indexOf('browser-close:1')<lifecycle.indexOf('destroy:1'));
+  assert.ok(lifecycle.indexOf('destroy:1')<lifecycle.indexOf('auth-clear:1'));
+  assert.ok(state.activity.some(entry=>entry.kind==='WhatsApp Remote logout failed'&&entry.detail.includes('detached Frame')));
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp Web startup errors are shown in the connection detail',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-start-error-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_WEB_START_ERROR:'fixture browser launch failure'});
+ try{
+  await engine.call('setup',{shop:'Web start error',language:'en',printer:'',mono:1200,colour:3500,photo:10000});
+  await engine.call('webConnect',null);
+  let state;
+  for(let attempt=0;attempt<30;attempt++){
+   state=await engine.call('snapshot',null);
+   if(state.connection.status==='Connection Failed')break;
+   await new Promise(resolve=>setTimeout(resolve,35));
+  }
+  assert.match(state.connection.detail,/WhatsApp Web could not start:.*fixture browser launch failure/);
+  await new Promise(resolve=>setTimeout(resolve,5300));
+  const lifecycle=(await readFile(join(root,'web-lifecycle.log'),'utf8')).split(/\r?\n/);
+  assert.equal(lifecycle.filter(event=>event.startsWith('launch:')).length,1);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('WhatsApp initialization reports the exact authentication-state wait failure',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-web-auth-state-timeout-'));
+ const engine=start(root,'web',{BLOOMCONNECT_TEST_WEB_AUTH_STATE_TIMEOUT:'1'});
+ try{
+  await engine.call('webConnect',null);
+  const state=await engine.call('snapshot',null);
+  assert.equal(state.connection.status,'Connection Failed');
+  assert.match(state.connection.detail,/authentication-state wait \(WAWebSocketModel\.Socket\.state\)/);
+  assert.ok(state.activity.some(entry=>entry.kind==='WhatsApp Engine initialization failed'
+   &&entry.detail.includes('WAWebSocketModel.Socket.state')
+   &&entry.detail.includes('Waiting failed:60000ms exceeded')));
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
 
 test('WhatsApp Web reconnects automatically and restores the provider after restart',async()=>{
  const root=await mkdtemp(join(tmpdir(),'bloom-web-reconnect-'));
  let engine=start(root,'web');
- const waitFor=async(status)=>{
+ const waitFor=async(status,requireHistory=false)=>{
   for(let attempt=0;attempt<240;attempt++){
    const state=await engine.call('snapshot',null);
-   if(state.connection.status===status)return state;
+   if(state.connection.status===status&&(!requireHistory||state.connection.sync?.startsWith('Recent chats synced')))return state;
    await new Promise(resolve=>setTimeout(resolve,50));
   }
   assert.fail('Did not reach '+status);
  };
  try{
+  await writeFile(join(root,'delay-initial-chats'),'Delay initial history');
   await writeFile(join(root,'release-qr'),'Ready');
   await engine.call('webConnect',null);
-  const initial=await waitFor('Connected');
+  const initial=await waitFor('Connected',true);
+  assert.ok(initial.messages.some(message=>message.id==='fixture-old-pdf'));
   await writeFile(join(root,'disconnect-web'),'Disconnect');
-  await waitFor('Offline');
+  await waitFor('Connection Failed');
   const restored=await waitFor('Connected');
   assert.equal(restored.connection.phone,initial.connection.phone);
   await engine.stop();
   engine=start(root,'web');
-  await waitFor('Connected');
+  const restarted=await waitFor('Connected',true);
+  assert.ok(restarted.messages.some(message=>message.id==='fixture-old-pdf'));
   await engine.call('logout',null);
   await new Promise(resolve=>setTimeout(resolve,5500));
   assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');
@@ -385,18 +690,22 @@ test('bulk photo settings, mixed PDF/photo order and reprint snapshots preserve 
   await assert.rejects(engine.call('order',{...pricedPhotos,price:5550}),/Photo price changed/);
   const duplexOrder=await engine.call('order',pricedPhotos);
   assert.equal((await engine.call('snapshot',null)).jobs.find(j=>j.id===duplexOrder).total,4350);
-  const id=await engine.call('order',{customer,files:files.map(f=>f.id),copies:1,paper:'A4',colour:true,price:15000,discount:0,charge:0,printSettings:options});
+  const mixedOptions={...options,pdfSettings:{copies:1,nup:1,duplex:'simplex',colour:false}};
+  const id=await engine.call('order',{customer,files:files.map(f=>f.id),copies:1,paper:'A4',colour:true,price:15000,discount:0,charge:0,printSettings:mixedOptions});
   await assert.rejects(engine.call('order',{customer:null,files:files.map(f=>f.id),copies:1,paper:'A4',colour:true,price:15000,discount:0,charge:0,printSettings:options}),/same customer/);
   await assert.rejects(engine.call('order',{customer,files:photos.map(f=>f.id),copies:1,paper:'A4',colour:true,price:9999,discount:0,charge:0,printSettings:{...options,photoBatch:true}}),/Photo price changed/);
   await engine.call('payment',{id,amount:1000,method:'Cash'});
   await assert.rejects(engine.call('updatePhotoOrder',{id,files:files.map(f=>f.id),printSettings:options,total:999,reason:'Invalid reduction'}),/lower than payments/);
   await assert.rejects(engine.call('updatePhotoOrder',{id,files:[photos[0].id],printSettings:options,total:15000,reason:'Remove original files'}),/Keep every original/);
-  await engine.call('updatePhotoOrder',{id,files:files.map(f=>f.id),printSettings:options,total:18000,reason:'Operator revised the photo and PDF quote'});
+  await engine.call('updatePhotoOrder',{id,files:files.map(f=>f.id),printSettings:mixedOptions,total:18000,reason:'Operator revised the photo and PDF quote'});
   await engine.call('rule',{name:'Whole order confirmed',trigger:'print-completed',keyword:'',actions:['notify'],text:'All files verified',enabled:true,graph:''});
-  const entry=await engine.call('printStart',{id,printer:'Fixture only',...options,fileSelection:photos.map(p=>p.id)});await engine.call('printFinish',{id:entry,error:'',partial:false});await engine.call('queue',{id:entry,status:'Completed'});
+  const photoSubmission={id,printer:'Fixture only',...options,fileSelection:photos.map(p=>p.id)};
+  const entry=await engine.call('printStart',photoSubmission);await engine.call('printFinish',{id:entry,error:'',partial:false});
+  await assert.rejects(engine.call('printStart',photoSubmission),/Confirm or close/);
   await assert.rejects(engine.call('stage',{id,status:'Ready for Pickup'}),/Confirm physical printing/);
   assert.equal((await engine.call('snapshot',null)).activity.some(a=>a.kind==='Operator notification'&&a.detail==='All files verified'),false);
-  const pdfEntry=await engine.call('printStart',{id,...options,printer:'Fixture only',fileSelection:files.filter(f=>f.mime==='application/pdf').map(f=>f.id)});await engine.call('printFinish',{id:pdfEntry,error:'',partial:false});await engine.call('queue',{id:pdfEntry,status:'Completed'});
+  const pdfEntry=await engine.call('printStart',{id,...options,printer:'Fixture only',fileSelection:files.filter(f=>f.mime==='application/pdf').map(f=>f.id)});await engine.call('printFinish',{id:pdfEntry,error:'',partial:false});
+  await engine.call('queue',{id:entry,status:'Completed'});await engine.call('queue',{id:pdfEntry,status:'Completed'});
   await engine.call('stage',{id,status:'Ready for Pickup'});
   assert.equal((await engine.call('snapshot',null)).activity.filter(a=>a.kind==='Operator notification'&&a.detail==='All files verified').length,1);
   const reprint=await engine.call('printStart',{id,...options,printer:'Fixture only'});await engine.call('printFinish',{id:reprint,error:'',partial:false});
@@ -404,6 +713,74 @@ test('bulk photo settings, mixed PDF/photo order and reprint snapshots preserve 
   assert.equal(saved.jobs.find(j=>j.id===id).printSettings.photoItems[photos[0].id].quantity,3);
   assert.equal(saved.jobs.find(j=>j.id===id).total,18000);assert.equal(saved.queue.length,3);
   assert.equal(JSON.parse(saved.queue[0].settings).photoItems[photos[1].id].widthMm,50.8);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('PDF batch bills each layout once and permits distinct files to queue under the same order',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-pdf-batch-'));const engine=start(root);
+ try{
+  const paperRates={A3:{mono:200,duplexMono:300},Legal:{mono:175,colour:700}};
+  await engine.call('setup',{shop:'PDF batch test',language:'en',printer:'',mono:100,colour:400,photo:500,paperRates});
+  assert.deepEqual((await engine.call('snapshot',null)).settings.paperRates,paperRates);
+  const paths=[join(root,'first.pdf'),join(root,'second.pdf')];
+  for(const [index,path] of paths.entries())await writeFile(path,'%PDF-1.7\n% test '+index);
+  await engine.call('importLocal',{paths,customer:null});
+  const {attachments}=await engine.call('snapshot',null);
+  const [first,second]=paths.map(path=>attachments.find(file=>path.endsWith(file.name)).id);
+  const mono={paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',nup:1};
+  const colour={...mono,paper:'A3',copies:2,colour:true,landscape:true,duplex:'shortEdge',nup:2,booklet:true,signaturePages:4,binding:'right'};
+  const common={printer:'Fixture only',rotation:0,fit:'contain',layout:'single'};
+  const calculations=[[first,mono],[second,colour]].map(([id,file])=>({id,settings:{
+   documentPages:id===first?4:5,copies:file.copies,paper:file.paper,mode:file.colour?'colour':'mono',
+   pagesPerSide:file.nup,duplex:file.duplex,imposition:file.booklet?'booklet':'ordinary',
+   signaturePages:file.signaturePages,binding:file.binding,pricing:{basis:'sheet',mono:100,colour:400}
+  }}));
+  const id=await engine.call('order',{customer:null,files:[first,second],copies:1,paper:'A4',colour:false,price:0,discount:250,charge:500,calculations,printSettings:{...common,...mono,batchPdfFiles:{[first]:mono,[second]:colour}}});
+  const order=(await engine.call('snapshot',null)).jobs.find(job=>job.id===id);
+  assert.equal(order.total,2250);
+  assert.deepEqual(order.printSettings.orderAdjustments,{charge:500,discount:250});
+  for(const [key,value] of Object.entries(colour))assert.equal(order.printSettings.batchPdfFiles[second][key],value);
+  const input={id,...common,...mono,fileSelection:[first]};
+  await assert.rejects(engine.call('printStart',{...input,fileSelection:[first,second]}),/billed settings/);
+  const entry=await engine.call('printStart',input);
+  await engine.call('printFinish',{id:entry,error:'',partial:false});
+  await assert.rejects(engine.call('printStart',input),/Confirm or close/);
+  await assert.rejects(engine.call('printStart',{id,...common,...mono,fileSelection:[second]}),/billed settings/);
+  const next=await engine.call('printStart',{id,...common,...colour,fileSelection:[second]});
+  await assert.rejects(engine.call('confirmPrintSubmissions',{id,entries:[entry]}),/finish sending/);
+  await engine.call('printFinish',{id:next,error:'',partial:false});
+  await assert.rejects(engine.call('confirmPrintSubmissions',{id,entries:[entry]}),/queue changed/);
+  await assert.rejects(engine.call('stage',{id,status:'Ready for Pickup'}),/Confirm physical printing/);
+  await engine.call('confirmPrintSubmissions',{id,entries:[entry,next]});
+  assert.deepEqual((await engine.call('snapshot',null)).queue.filter(entry=>entry.job_id===id).map(entry=>entry.status),['Completed','Completed']);
+  await engine.call('stage',{id,status:'Ready for Pickup'});
+  assert.equal((await engine.call('snapshot',null)).jobs.length,1);
+  const sameSettings=[first,second].map((file,index)=>({id:file,settings:{...calculations[0].settings,documentPages:index===0?4:5}}));
+  const bulk=await engine.call('order',{customer:null,files:[first,second],copies:1,paper:'A4',colour:false,price:0,charge:0,discount:0,
+   calculations:sameSettings,printSettings:{...common,...mono,batchPdfFiles:{[first]:mono,[second]:mono}}});
+  const group=await engine.call('printStart',{id:bulk,...common,...mono,fileSelection:[first,second]});
+  await engine.call('printFinish',{id:group,error:'',partial:false});
+  const bulkEntries=(await engine.call('snapshot',null)).queue.filter(item=>item.job_id===bulk);
+  assert.equal(bulkEntries.length,1);
+  assert.deepEqual(JSON.parse(bulkEntries[0].settings).fileSelection,[first,second]);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('PDF Studio registers a walk-in print copy and reuses the same prepared PDF',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-studio-print-'));const engine=start(root);
+ try{
+  const pdf=await require('pdf-lib').PDFDocument.create();
+  pdf.addPage([200,300]);
+  const bytes=await pdf.save();
+  const id=await engine.call('importStudioPrint',{name:'Studio output',bytes});
+  assert.equal(await engine.call('importStudioPrint',{name:'Studio output copy',bytes}),id);
+  const snapshot=await engine.call('snapshot',null);
+  const attachment=snapshot.attachments.find(item=>item.id===id);
+  assert.equal(attachment.status,'Ready');
+  assert.equal(attachment.mime,'application/pdf');
+  assert.equal(attachment.customer_id,null);
+  assert.equal(snapshot.jobs.length,0);
+  await assert.rejects(engine.call('importStudioPrint',{name:'invalid',bytes:new Uint8Array([1,2,3])}),/Prepare a PDF/);
  }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
 });
 

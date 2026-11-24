@@ -6,8 +6,9 @@ const {join,resolve}=require('node:path');
 async function main(){
   const root=await mkdtemp(join(tmpdir(),'bloom-web-smoke-'));
   const packaged=process.argv.includes('--packaged');
-  const engine=packaged?'release/win-unpacked/resources/app.asar/dist/engine.cjs':'dist/engine.cjs';
-  const execPath=packaged?resolve('release/win-unpacked/BloomConnect.exe'):process.execPath;
+  const packageDir=process.env.BLOOMCONNECT_SMOKE_PACKAGE_DIR??'release/win-unpacked';
+  const engine=packaged?join(packageDir,'resources/app.asar/dist/engine.cjs'):'dist/engine.cjs';
+  const execPath=packaged?resolve(packageDir,'BloomConnect.exe'):process.execPath;
   const child=fork(resolve(engine),[root],{execPath,env:{...process.env,ELECTRON_RUN_AS_NODE:packaged?'1':'',BLOOMCONNECT_WEB_SMOKE:'1',BLOOMCONNECT_TEST_WEBHOOK:'1'},stdio:['ignore','ignore','inherit','ipc'],serialization:'advanced'});
   let sequence=0;
   const calls=new Map();
@@ -31,11 +32,11 @@ async function main(){
     await invoke('webConnect',null);
     for(let n=0;n<90;n++){
       const {connection}=await invoke('snapshot',null);
-      if(connection.status==='Scan QR'&&/^data:image\/png;base64,/.test(connection.qr)){
-        console.log('WhatsApp Web returned a QR code and the engine encoded it. No account was linked.');
+      if(connection.status==='QR Ready'&&/^data:image\/png;base64,/.test(connection.qr)){
+        console.log('BloomConnect received a fresh QR from the live WhatsApp Web login.');
         return;
       }
-      if(connection.status==='Offline')throw new Error(connection.detail);
+      if(connection.status==='Connection Failed')throw new Error(connection.detail);
       await new Promise(resolve=>setTimeout(resolve,1000));
     }
     throw new Error('WhatsApp Web did not produce a QR code before the smoke-test timeout.');

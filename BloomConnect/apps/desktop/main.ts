@@ -1,19 +1,23 @@
 import {mkdirSync} from 'node:fs';
-import {queryCapabilities,validatePrinter,openPrinterDialog,windowsBridge} from '../../packages/printing/windows';
-import {isFileOutputPrinter,isPdfPrinter,isVirtualPrinter} from '../../packages/printing/capabilities';
+import {queryCapabilities,openPrinterDialog,windowsBridge} from '../../packages/printing/windows';
+import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,submissionDuplex,validateSubmissionPrinter} from '../../packages/printing/capabilities';
 import {normalizedSettings,type ManualFeedProfile} from '../../packages/printing/settings';
+import {driverDuplex,duplexEdge,isManualDuplex} from '../../packages/printing/duplex';
+import {orientedPaper} from '../../packages/printing/plan';
 import {paperDimensions} from '../../packages/printing/paper';
 import {paperSizes} from '../../packages/printing/calculation';
 import {app,BrowserWindow,clipboard,dialog,ipcMain,safeStorage,session,protocol,net,shell} from 'electron';
+import {startAppUpdates} from './app-updates';
 import {openLicensePurchase,performSupportAction} from '../../packages/shared/support';
 import {fork,type ChildProcess} from 'node:child_process';
-import {join,isAbsolute} from 'node:path';
-import {mkdir,mkdtemp,open,readFile,rename,rm,unlink,writeFile} from 'node:fs/promises';
+import {basename,extname,join,isAbsolute} from 'node:path';
+import {copyFile,mkdir,mkdtemp,open,readFile,rename,rm,unlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
-import {schemas,type Operation,type Input,type Payment} from '../../packages/shared/contracts';
+import {schemas,type Operation,type Input,type Job,type Payment} from '../../packages/shared/contracts';
 import {openOfflineLicense} from './offline-license';
+import {cleanStudioScan,convertStudioWord,recognizeStudioScan,secureStudioPdf,writeStudioExport} from './studio-local';
 import {WEBSITE_LICENSE_LIMIT as LIMIT} from '../../packages/licensing/website-license';
 let main:BrowserWindow;
 let startupSplash:BrowserWindow|undefined;
@@ -23,6 +27,7 @@ let licenseMonitor:NodeJS.Timeout;
 let suspendingEngine=false;
 let engineRetryAfter=0;
 let root:string;
+let lastStudioOutput:string|undefined;
 let stopping=false;
 let sequence=0;
 const awaiting=new Map<number,{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timeout:NodeJS.Timeout}>();
@@ -144,47 +149,70 @@ function startWorkspaceWindow(window:BrowserWindow,visible:boolean,verify:boolea
 }
 function trusted(event:Electron.IpcMainInvokeEvent){return main&&!main.isDestroyed()&&event.sender.id===main.webContents.id&&event.senderFrame?.url===index}
 const escape=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]??c));
+async function saveCustomerPdf(filename:string,document:string){
+ const selection=await dialog.showSaveDialog(main,{defaultPath:filename,filters:[{name:'PDF',extensions:['pdf']}]});
+ if(!selection.filePath)return false;
+ const win=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});lock(win);
+ try{
+  await win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<meta charset="utf-8">'+document));
+  await writeFile(selection.filePath,await win.webContents.printToPDF({pageSize:'A5'}));
+  return true;
+ }finally{win.destroy()}
+}
 async function selectedPrintFiles(input:Input<'savePrintPdf'>){
- const available=await engine<{id:string}[]>('printable',{id:input.id});
+ const available=await engine<{id:string;name:string}[]>('printable',{id:input.id});
  if(!input.fileSelection)return available;
  if(new Set(input.fileSelection).size!==input.fileSelection.length||input.fileSelection.some(id=>!available.some(file=>file.id===id)))throw new Error('Print selection must contain unique files from this order.');
  return input.fileSelection.map(id=>available.find(file=>file.id===id)!);
 }
-async function printOrder(input:Input<'print'>){
-  const manual=input.duplex==='manualLongEdge'||input.duplex==='manualShortEdge';
+let activePrintOperations=0;
+async function printOrder(input:Input<'print'>,test=false){
+  activePrintOperations++;
+  try{return await submitPrintOrder(input,test)}finally{activePrintOperations--}
+}
+async function submitPrintOrder(input:Input<'print'>,test=false){
   const list=await main.webContents.getPrintersAsync();
   if(!list.some(p=>p.name===input.printer))throw new Error('Select an available Windows printer.');
   const verified=normalizedSettings(input);
-  const capabilities=await queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified);
-  if(isPdfPrinter(input.printer,capabilities.driver))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
-  const fileOutput=isFileOutputPrinter(capabilities.port);
-  const virtual=isVirtualPrinter(input.printer)||isVirtualPrinter(capabilities.driver)||fileOutput;
-  if(virtual&&(verified.duplex!=='simplex'||verified.tray!==undefined||verified.driverDpi))throw new Error('Duplex, explicit trays and driver resolution require a physical printer.');
-  validatePrinter(verified,capabilities);
-  if(Object.keys(verified.photoItems).length){
+  if(isPdfPrinter(input.printer))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
+  const capabilities=await queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified).catch(error=>{
+    if(!canPrintWithoutCapabilities({...verified,duplex:submissionDuplex(verified.duplex,isVirtualPrinter(input.printer))}))throw error;
+    return undefined;
+  });
+  if(isPdfPrinter(input.printer,capabilities?.driver))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
+  const fileOutput=isFileOutputPrinter(capabilities?.port??'');
+  const virtual=isVirtualPrinter(input.printer)||isVirtualPrinter(capabilities?.driver??'')||fileOutput;
+  if(test&&virtual)throw new Error('Select a physical printer to test double-sided output.');
+  const outputMode=submissionDuplex(verified.duplex,virtual,capabilities?.duplex);
+  const manual=isManualDuplex(outputMode);
+  if(capabilities)validateSubmissionPrinter(verified,capabilities,virtual);
+  if(capabilities&&Object.keys(verified.photoItems).length){
     const margins=verified.margins??{left:verified.marginMm,right:verified.marginMm,top:verified.marginMm,bottom:verified.marginMm};
     for(const edge of ['left','right','top','bottom'] as const)if(Math.max(margins[edge],verified.printable?.[edge]??0)+.1<capabilities.printable[edge])throw new Error('Photo layout exceeds this printer printable area. Refresh the printer selection and review the new layout before printing.');
   }
   const native=verified.tray!==undefined||!!verified.driverDpi;
-  const files=await selectedPrintFiles(input);
-  if(!files.length)throw new Error('This order has no files.');
+  const files=test?[]:await selectedPrintFiles(input);
+  if(!test&&!files.length)throw new Error('This order has no files.');
   if(input.booklet&&(input.nup!==2||input.duplex==='simplex'||!input.landscape))throw new Error('Booklets require landscape paper, two pages per side and duplex.');
-  const edge=input.duplex==='manualLongEdge'?'long':'short';
+  const [sheetWidth,sheetHeight]=orientedPaper(verified);
+  let sheetLandscape=sheetWidth===sheetHeight?input.landscape:sheetWidth>sheetHeight;
+  let edge=duplexEdge(input.duplex,sheetLandscape);
   const profile=manual&&verified.orientation!=='auto'
-    ?await engine<ManualFeedProfile|null>('manualFeedProfile',{printer:input.printer,landscape:verified.orientation==='landscape'||verified.orientation==='legacy'&&input.landscape,edge})
+    ?await engine<ManualFeedProfile|null>('manualFeedProfile',{printer:input.printer,landscape:sheetLandscape,edge})
     :null;
   const first=input.manualFirstSide??profile?.first??'front',second=first==='front'?'back':'front';
-  const entry=await engine<string>('printStart',{...input,manualFirstSide:manual?first:undefined,manualFeedApplied:profile??undefined});
+  const entry=test?'':await engine<string>('printStart',{...input,manualFeedApplied:profile??undefined});
   let attempted=false;
-  let secondAttempted=false;
-  async function submitPass(pass:Input<'print'>,reverse=false,rotate=false,secondPass=false){
+  let cancelled=false;
+  let verifiedFeed:ManualFeedProfile|undefined;
+  async function submitPass(pass:Input<'print'>,reverse=false,rotate=false){
     const win=new BrowserWindow(printWindowOptions);
     lock(win);
     const viewId=win.webContents.id;
     try{
       const rendered=new Promise<void>((resolve,reject)=>{
         const timer=setTimeout(()=>reject(new Error('Print preparation timed out.')),90000);
-        printViews.set(viewId,{data:{input:pass,files},ready:error=>{clearTimeout(timer);if(error)reject(new Error(error));else resolve()}});
+        printViews.set(viewId,{data:{input:pass,files,testDuplex:test},ready:error=>{clearTimeout(timer);if(error)reject(new Error(error));else resolve()}});
         win.once('closed',()=>{clearTimeout(timer);reject(new Error('Print view closed.'))});
       });
       await Promise.all([win.loadURL(index+'?print=1'),rendered]);
@@ -197,9 +225,11 @@ async function printOrder(input:Input<'print'>){
       const pageSize={width:Math.round(width*1000),height:Math.round(height*1000)};
       const manifest=await win.webContents.executeJavaScript('window.__printManifest') as {widthMm:number;heightMm:number;hasColour:boolean;sides:number};
       const landscape=Math.abs(width-height)<.001?input.landscape:Math.abs(manifest.widthMm-height)<.01&&Math.abs(manifest.heightMm-width)<.01;
+      sheetLandscape=manifest.widthMm===manifest.heightMm?input.landscape:manifest.widthMm>manifest.heightMm;
+      edge=duplexEdge(pass.duplex,sheetLandscape);
       const colour=manifest.hasColour;
-      if(colour&&!capabilities.colour)throw new Error('The selected printer does not advertise colour printing.');
-      const duplexMode=pass.duplex==='longEdge'?'longEdge':pass.duplex==='shortEdge'?'shortEdge':'simplex';
+      if(colour&&capabilities&&!capabilities.colour)throw new Error('The selected printer does not advertise colour printing.');
+      const duplexMode=driverDuplex(outputMode,sheetLandscape);
       if(native){
         const folder=await mkdtemp(join(tmpdir(),'bloom-native-print-'));
         try{
@@ -216,17 +246,15 @@ async function printOrder(input:Input<'print'>){
             await writeFile(path,Buffer.from(png.slice('data:image/png;base64,'.length),'base64'));
             pages.push(path);
           }
-          attempted=true;
-          if(secondPass)secondAttempted=true;
           requireLicense();
+          attempted=true;
           const result=await windowsBridge(join(__dirname,'windows.ps1'),'submit',{printer:input.printer,widthMm:width,heightMm:height,landscape,colour,duplex:duplexMode,tray:verified.tray,dpi:verified.driverDpi,title:input.id,pages});
           if(!result?.submitted||result.pages!==pages.length)throw new Error('Windows did not confirm all prepared sides.');
         }finally{await rm(folder,{recursive:true,force:true})}
         return;
       }
-      attempted=true;
-      if(secondPass)secondAttempted=true;
       requireLicense();
+      attempted=true;
       await new Promise<void>((resolve,reject)=>win.webContents.print({silent:!fileOutput,deviceName:input.printer,landscape,color:colour,copies:1,collate:false,duplexMode,pageSize,margins:{marginType:'none'},printBackground:true},(success,reason)=>success?resolve():reject(new Error(reason||'Windows did not confirm submission.'))));
     }finally{printViews.delete(viewId);if(!win.isDestroyed())win.destroy()}
   }
@@ -235,16 +263,35 @@ async function printOrder(input:Input<'print'>){
     if(manual){
       const result=await dialog.showMessageBox(main,{
         type:'question',title:'Manual two-sided printing',message:'Reload the '+first+'-side sheets',
-        detail:(profile?profile.instructions+' ': 'Wait until the first pass finishes. Reload the same sheets with the blank side positioned for your printer. ')+'Confirm the '+edge+'-edge flip and set the stack order before printing the '+second+' sides.',
+        detail:(profile?profile.instructions+' ': 'Wait for the first pass. Reload the stack so the printer prints on the blank side. Keep the marked top edge in mind. Feed direction varies by printer. ')+'Confirm the '+edge+'-edge flip and set the stack order before printing the '+second+' sides.',
         buttons:['Print '+second+' sides','Print '+second+' sides in reverse order','Cancel'],defaultId:profile?.reverseSecond?1:0,cancelId:2,
         checkboxLabel:'Rotate the second pass 180 degrees',checkboxChecked:profile?.rotateSecond??false
       });
-      if(result.response===2)throw new Error('Manual duplex was cancelled after the first pass. Check the sheets before starting another job.');
-      await submitPass({...input,sideSelection:second},result.response===1,result.checkboxChecked,true);
+      if(result.response===2){
+        cancelled=true;
+        throw new Error('Manual duplex was cancelled after the first pass. Check the sheets before starting another job.');
+      }
+      await submitPass({...input,sideSelection:second},result.response===1,result.checkboxChecked);
+      verifiedFeed={first,reverseSecond:result.response===1,rotateSecond:result.checkboxChecked,instructions:profile?.instructions??'Reinsert the sheets with the same face and top-edge direction used for your verified test.'};
     }
-    await engine('printFinish',{id:entry,error:'',partial:false});
+    if(entry)await engine('printFinish',{id:entry,error:'',partial:false});
+    if(test){
+      const check=await dialog.showMessageBox(main,{type:'question',title:'Verify double-sided printing',message:'Are both sides upright when you flip on the '+edge+' edge?',detail:'Check the FRONT and BACK arrows on the paper before saving this preset.',buttons:['Save verified preset','Close'],defaultId:1,cancelId:1});
+      if(check.response===0){
+        const {id:_,...settings}=input;
+        const mode=input.duplex==='auto'?'Auto':manual?'Manual':'Override';
+        const printerLabel=input.printer.slice(0,92);
+        await engine('savePrintPreset',{name:'Verified duplex - '+printerLabel+' - '+input.paper+' '+(sheetLandscape?'landscape':'portrait')+' - '+mode+' '+edge+' edge',settings});
+        if(verifiedFeed){
+          const directions=['Printed side up, top edge first','Printed side up, top edge last','Printed side down, top edge first','Printed side down, top edge last'];
+          const feed=await dialog.showMessageBox(main,{type:'question',title:'Save the verified paper feed',message:'How did you reload the test sheet?',detail:'Choose the face and edge that produced the upright back, or skip saving reinsertion instructions.',buttons:[...directions,'Skip'],defaultId:4,cancelId:4});
+          if(feed.response<directions.length)await engine('saveManualFeedProfile',{printer:input.printer,landscape:sheetLandscape,edge,profile:{...verifiedFeed,instructions:'Reload with '+directions[feed.response].toLowerCase()+'.'},verified:true});
+        }
+      }
+    }
   }catch(error){
-    await engine('printFinish',{id:entry,error:error instanceof Error?error.message:'Printer submission failed.',partial:attempted,cancelled:manual&&attempted&&!secondAttempted});
+    if(entry)await engine('printFinish',{id:entry,error:error instanceof Error?error.message:'Printer submission failed.',partial:attempted,cancelled});
+    if(test&&cancelled)return {entry};
     throw error;
   }
   return {entry};
@@ -252,7 +299,10 @@ async function printOrder(input:Input<'print'>){
 async function savePreparedPdf(input:Input<'savePrintPdf'>){
   const files=await selectedPrintFiles(input);
   if(!files.length)throw new Error('This order has no files.');
-  const selected=await dialog.showSaveDialog(main,{defaultPath:input.id+'-prepared.pdf',filters:[{name:'PDF',extensions:['pdf']}]});
+  const filename=input.fileSelection?.length===1&&files[0].name
+    ?input.id+'-'+files[0].name.replace(/\.pdf$/i,'').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,100)+'.pdf'
+    :input.id+'-prepared.pdf';
+  const selected=await dialog.showSaveDialog(main,{defaultPath:filename,filters:[{name:'PDF',extensions:['pdf']}]});
   if(selected.canceled||!selected.filePath)return false;
   const win=new BrowserWindow(printWindowOptions);lock(win);
   try{
@@ -285,6 +335,7 @@ else void app.whenReady().then(async()=>{
   licenseMonitor.unref();
   main=new BrowserWindow({...windowOptions,webPreferences:{...windowOptions.webPreferences,backgroundThrottling:process.env.BLOOMCONNECT_SMOKE_VISUAL!=='1'&&process.env.BLOOMCONNECT_SMOKE_PRINT!=='1'},width:1450,height:950,minWidth:1000,minHeight:700,backgroundColor:'#0a1028',show:false,paintWhenInitiallyHidden:true,title:'BloomConnect',autoHideMenuBar:true});
   lock(main);
+  startAppUpdates(main,trusted,()=>activePrintOperations>0||printViews.size>0);
   ipcMain.handle('bloom:license',async(event,action:unknown,value:unknown)=>{
     if(!trusted(event))throw new Error('Unauthorized license request.');
     if(action==='status')return syncLicensedEngine();
@@ -342,7 +393,13 @@ else void app.whenReady().then(async()=>{
       case 'supportAction':return performSupportAction(schemas.supportAction.parse(input).action,url=>shell.openExternal(url),value=>clipboard.writeText(value));
       case 'printers':return main.webContents.getPrintersAsync();
       case 'printerCapabilities':{const request=schemas.printerCapabilities.parse(input);return queryCapabilities(join(__dirname,'windows.ps1'),request.printer,request.settings?normalizedSettings(request.settings):undefined)}
+      case 'testDuplex':{
+        const request=schemas.testDuplex.parse(input);
+        await printOrder({id:'Duplex test',...request,copies:1,colour:false,range:'',rotation:0,fit:'contain',layout:'single'},true);
+        return;
+      }
       case 'printerDialog':{const request=schemas.printerDialog.parse(input);const installed=await main.webContents.getPrintersAsync();if(!installed.some(p=>p.name===request.printer))throw new Error('Select an installed printer.');return openPrinterDialog(request.printer,request.kind)}
+      case 'openPrinterSettings':return shell.openExternal('ms-settings:printers');
       case 'savePrintPdf':return savePreparedPdf(schemas.savePrintPdf.parse(input));
       case 'connect':{
         if(!safeStorage.isEncryptionAvailable())throw new Error('Windows credential protection is unavailable.');
@@ -356,6 +413,26 @@ else void app.whenReady().then(async()=>{
         const selection=await dialog.showOpenDialog(main,{properties:['openFile','multiSelections'],filters:[{name:'Printable documents and images',extensions:['pdf','ppt','pptx','doc','docx','xls','xlsx','txt','jpg','jpeg','png','webp','tif','tiff','heic','heif']}]});
         if(selection.canceled)return 0;
         return engine('importLocal',{...schemas.import.parse(input),paths:selection.filePaths});
+      }
+      case 'cleanStudioScan':{
+        const request=schemas.cleanStudioScan.parse(input);
+        return cleanStudioScan(request.bytes,request.settings);
+      }
+      case 'recognizeStudioScan':{
+        const request=schemas.recognizeStudioScan.parse(input);
+        return recognizeStudioScan(request.bytes,request.language);
+      }
+      case 'convertStudioWord':return convertStudioWord(schemas.convertStudioWord.parse(input).bytes);
+      case 'secureStudioPdf':return secureStudioPdf(schemas.secureStudioPdf.parse(input));
+      case 'revealStudioOutput':if(lastStudioOutput)shell.showItemInFolder(lastStudioOutput);return;
+      case 'saveStudioDocument':{
+        const {format,name,bytes}=schemas.saveStudioDocument.parse(input);
+        const safeName=basename(name).replace(/[^\p{L}\p{N} ._-]/gu,'_').replace(/[. ]+$/,'')||'document';
+        const selection=await dialog.showSaveDialog(main,{title:'Save PDF Studio output',defaultPath:safeName+'.'+format,filters:[{name:format.toUpperCase(),extensions:[format]}]});
+        if(!selection.filePath||selection.canceled)return false;
+        await writeStudioExport(selection.filePath,format,bytes);
+        lastStudioOutput=selection.filePath;
+        return true;
       }
       case 'preview':return engine('getPreview',input);
       case 'print':return printOrder(schemas.print.parse(input));
@@ -373,14 +450,22 @@ else void app.whenReady().then(async()=>{
       }
       case 'receipt':{
         const {payment,shop}=await engine<{payment:Payment;shop:string}>('receiptData',input);
-        const selection=await dialog.showSaveDialog(main,{defaultPath:'Receipt-'+payment.job_id+'.pdf',filters:[{name:'PDF',extensions:['pdf']}]});
+        const doc='<h1>'+escape(shop)+'</h1><h2>Payment receipt</h2><p>Receipt '+escape(payment.id)+'</p><p>Order '+escape(payment.job_id)+'</p><p>'+escape(new Date(payment.created).toLocaleString('en-LK',{timeZone:'Asia/Colombo'}))+'</p><p>'+escape(payment.method)+' · LKR '+(payment.amount/100).toFixed(2)+'</p>';
+        return saveCustomerPdf('Receipt-'+payment.job_id+'.pdf',doc);
+      }
+      case 'bill':{
+        const {order,customer,shop,files}=await engine<{order:Job;customer:string;shop:string;files:string[]}>('billData',input);
+        const amount=(value:number)=>'LKR '+(value/100).toFixed(2);
+        const doc='<style>body{font:14px system-ui;overflow-wrap:anywhere}h1,h2{margin:0}dt{font-weight:600}dd{margin:0 0 8px}</style><h1>'+escape(shop)+'</h1><h2>Order bill</h2><p>'+escape(order.id)+' · '+escape(customer)+'</p><p>'+escape(new Date(order.created).toLocaleDateString('en-LK',{timeZone:'Asia/Colombo'}))+'</p>'+(order.status==='Cancelled'?'<p>Cancelled order</p>':'')+'<ul>'+files.map(file=>'<li>'+escape(file)+'</li>').join('')+'</ul><dl><dt>Total</dt><dd>'+amount(order.total)+'</dd><dt>Paid</dt><dd>'+amount(order.paid)+'</dd><dt>Balance</dt><dd>'+amount(order.total-order.paid)+'</dd></dl>';
+        return saveCustomerPdf('Bill-'+order.id+'.pdf',doc);
+      }
+      case 'saveAttachment':{
+        const file=await engine<{name:string;path:string}>('attachmentData',input);
+        const name=basename(file.name).replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
+        const selection=await dialog.showSaveDialog(main,{defaultPath:extname(name)?name:name+extname(file.path)});
         if(!selection.filePath)return false;
-        const win=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});lock(win);
-        try{
-          const doc='<meta charset="utf-8"><h1>'+escape(shop)+'</h1><h2>Payment receipt</h2><p>Receipt '+escape(payment.id)+'</p><p>Order '+escape(payment.job_id)+'</p><p>'+escape(new Date(payment.created).toLocaleString('en-LK',{timeZone:'Asia/Colombo'}))+'</p><p>'+escape(payment.method)+' · LKR '+(payment.amount/100).toFixed(2)+'</p>';
-          await win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(doc));
-          await writeFile(selection.filePath,await win.webContents.printToPDF({pageSize:'A5'}));return true;
-        }finally{win.destroy()}
+        await copyFile(file.path,selection.filePath);
+        return true;
       }
       default:return engine(op,input);
     }
@@ -428,6 +513,9 @@ else void app.whenReady().then(async()=>{
           (await wait(()=>button('About BloomConnect'))).click();
           const about=await wait(()=>document.querySelector('.about-page'));
           await wait(()=>about.innerText.includes('Version '+${JSON.stringify(app.getVersion())}));
+          const updates=await window.bloomUpdates.call('status');
+          if(updates.version!==${JSON.stringify(app.getVersion())}||updates.state!=='unavailable')throw Error('Offline update status did not load.');
+          await wait(()=>document.querySelector('main')?.innerText.includes('This installation has no automatic update channel.'));
           const click=async(name,scope)=>{(await wait(()=>button(name,scope))).click();await new Promise(resolve=>setTimeout(resolve,100))};
           for(const action of ['Chat on WhatsApp','Call Support','Copy Phone Number'])await click(action,about);
           await wait(()=>about.innerText.includes('Support number copied.'));
@@ -453,7 +541,13 @@ else void app.whenReady().then(async()=>{
       const sample=join(root,'smoke-sample.pdf');
       const scanFixture=process.env.BLOOMCONNECT_SMOKE_SCAN;
       if(scanFixture)await writeFile(sample,await readFile(scanFixture));
-      else await writeFile(sample,await main.webContents.printToPDF({pageSize:'A4'}));
+      else{
+        const sampleWindow=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+        try{
+          await sampleWindow.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<h1>BloomConnect print test</h1><p>A sample PDF for the document workflow.</p>'));
+          await writeFile(sample,await sampleWindow.webContents.printToPDF({pageSize:'A4'}));
+        }finally{sampleWindow.destroy()}
+      }
       await engine('importLocal',{paths:[sample],customer:null});
       await main.loadURL(index);
       const preview=await main.webContents.executeJavaScript(`(async()=>{
@@ -470,22 +564,31 @@ else void app.whenReady().then(async()=>{
           const popup=await wait(()=>document.querySelector('dialog[open][aria-label="PDF Print Preview"]'));
           await wait(()=>popup.querySelector('.preview small')?.textContent?.includes('210 x 297'),'rendered A4 sheet');
           await wait(()=>popup.querySelector('.print-calculation-summary'),'sheet estimate');
+          if([...popup.querySelectorAll('button')].some(item=>item.textContent.trim()==='Advanced options'))throw Error('Print options must be directly accessible.');
           if(![...popup.querySelectorAll('.print-calculation-summary>div')].some(item=>item.querySelector('small')?.textContent==='Physical sheets'&&item.querySelector('strong')?.textContent==='1'))throw Error('Popup did not calculate the physical sheet count');
           if(!popup.querySelector('.quick-pdf-help')?.textContent.includes('1-3, 5'))throw Error('Print example missing');
           for(const label of ['Actual size','Match paper to PDF page size','Page Setup','Landscape']){
             if(!popup.textContent.includes(label))throw Error('Missing PDF print setting: '+label);
           }
-          const radios=[...popup.querySelectorAll('.quick-pdf-scale input[type="radio"]')];
-          if(radios.length!==4||radios.some(radio=>radio.getBoundingClientRect().width>18))throw Error('PDF scaling buttons are misaligned');
-          if(radios.some(radio=>radio.nextElementSibling.getBoundingClientRect().left-radio.getBoundingClientRect().right>12))throw Error('PDF scaling label is separated from its button');
+          const scaling=popup.querySelector('select[aria-label="Page scaling"]');
+          if(!scaling?.getClientRects().length||![...scaling.options].some(option=>option.value==='actual'))throw Error('Page scaling must be directly accessible.');
           const submit=popup.querySelector('.print-sticky-actions button[type="submit"]');
-          if(!submit||submit.disabled)throw Error('Quick PDF submit disabled');
+          if(!submit||!submit.textContent.includes('Print Now'))throw Error('Print Now action missing');
           if(!submit.form.checkValidity())throw Error([...submit.form.querySelectorAll(':invalid')].map(el=>el.closest('label')?.innerText+' '+el.validationMessage).join(' | '));
-          submit.click();
-          await wait(()=>popup.innerText.includes('Order created.'),'order confirmation');
+          const saveOrder=await wait(()=>[...popup.querySelectorAll('button')].find(item=>item.textContent.trim()==='Save order for later'&&!item.disabled));
+          saveOrder.click();
+          await wait(()=>[...popup.querySelectorAll('[role="status"]')].some(item=>item.textContent.startsWith('Order BC-')&&item.textContent.endsWith('saved')),'order confirmation');
           const printer=popup.querySelector('select[aria-label="Printer"]');
           const devices=await window.bloom.call('printers',null);
           if(!devices.every(device=>[...printer.options].some(option=>option.value===device.name)))throw Error('Windows printer missing from the list');
+          const pdfDevice=devices.find(device=>device.name.includes('Microsoft Print to PDF'));
+          if(pdfDevice){
+            const setValue=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;
+            setValue.call(printer,pdfDevice.name);printer.dispatchEvent(new Event('change',{bubbles:true}));
+            await wait(()=>submit.textContent.includes('Save PDF')&&popup.innerText.includes('This printer creates a PDF file'),'PDF file destination action');
+            setValue.call(printer,'');printer.dispatchEvent(new Event('change',{bubbles:true}));
+            await wait(()=>submit.textContent.includes('Print Now')&&submit.disabled,'unavailable printer action');
+          }
           if(printer.options.length===1&&!submit.disabled)throw Error('Print enabled with no Windows printers installed');
           if(![...popup.querySelectorAll('button')].some(item=>item.textContent.trim()==='Save prepared PDF'))throw Error('Explicit PDF export is missing');
           popup.querySelector('button[aria-label="Close details"]').click();
@@ -568,21 +671,18 @@ else void app.whenReady().then(async()=>{
           const value=label=>[...document.querySelectorAll('.print-calculation-summary>div')].find(item=>item.querySelector('small')?.textContent===label)?.querySelector('strong')?.textContent;
           await wait(()=>value('Physical sheets')==='3');
           if(value('Selected pages')!=='10')throw new Error('Expected genuine ten-page PDF');
+          (await wait(()=>document.querySelector('.quick-pdf-sizing'))).open=true;
           const nup=field('Pages per side');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(nup,'4');nup.dispatchEvent(new Event('change',{bubbles:true}));
           await wait(()=>value('Physical sheets')==='2');
           const button=(name,root=document)=>[...root.querySelectorAll('button')].find(item=>item.textContent.trim()===name);
-          (await wait(()=>button('Advanced'))).click();
           const notes=[...document.querySelectorAll('.studio-workspace label')].find(item=>item.textContent.includes('Three slides with writing lines')).querySelector('input');
+          notes.closest('details').open=true;
           notes.click();
           await wait(()=>value('Physical sheets')==='2'&&field('Pages per side')?.value==='3');
-          (await wait(()=>button('Booklet Wizard'))).click();
+          (await wait(()=>button('Booklet'))).click();
           const wizard=await wait(()=>document.querySelector('dialog[open][aria-label="Booklet Wizard"]'));
-          (await wait(()=>button('Next',wizard))).click();
-          (await wait(()=>button('Next',wizard))).click();
-          const duplex=await wait(()=>wizard.querySelector('select'));
+          const duplex=await wait(()=>[...wizard.querySelectorAll('label')].find(label=>label.textContent.startsWith('Duplex'))?.querySelector('select'));
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(duplex,'shortEdge');duplex.dispatchEvent(new Event('change',{bubbles:true}));
-          (await wait(()=>button('Next',wizard))).click();
-          (await wait(()=>button('Next',wizard))).click();
           (await wait(()=>button('Apply and preview',wizard))).click();
           await wait(()=>value('Physical sheets')==='3');
           await wait(()=>document.querySelector('.studio-workspace .preview canvas:not([hidden])')&&!document.body.innerText.includes('Rendering final sheet'));
@@ -617,10 +717,14 @@ else void app.whenReady().then(async()=>{
           const path=join(root,'photo-fixture-'+i+'.png');
           await writeFile(path,await sharp({create:{width:600,height:400,channels:3,background}}).png().toBuffer());paths.push(path);
         }
-        await engine('importLocal',{paths,customer:null});
-        const snapshot=await engine<{attachments:{id:string;mime:string}[]}>('snapshot',null),photos=snapshot.attachments.filter(a=>a.mime==='image/png');
-        const settings=normalizedSettings({printer:'',paper:'A4',copies:1,colour:true,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single',marginMm:5,gapMm:2,autoRotate:true,photoBatch:true,photoItems:Object.fromEntries(photos.map((p,i)=>[p.id,{widthMm:i?50.8:101.6,heightMm:i?50.8:152.4,quantity:i?6:2,rotation:0,fit:'contain',brightness:110,contrast:95,saturation:85,sharpness:20,flipX:true,crop:{x:.05,y:.1,width:.9,height:.8}}]))});
-        const id=await engine<string>('order',{customer:null,files:photos.map(p=>p.id),copies:1,paper:'A4',colour:true,price:20000,discount:0,charge:0,printSettings:settings});
+        await engine('customer',{name:'Photo test customer',phone:'',notes:'',tag:''});
+        const customers=await engine<{customers:{id:string;name:string}[]}>('snapshot',null);
+        const customer=customers.customers.find(item=>item.name==='Photo test customer')!.id;
+        await engine('importLocal',{paths,customer});
+        const snapshot=await engine<{attachments:{id:string;customer_id:string|null;mime:string}[]}>('snapshot',null);
+        const photos=snapshot.attachments.filter(a=>a.mime==='image/png'&&a.customer_id===customer);
+        const settings=normalizedSettings({printer:'',paper:'A4',copies:1,colour:true,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single',marginMm:5,gapMm:2,autoRotate:true,photoBatch:true,photoGrid:{rows:2,columns:2},photoItems:Object.fromEntries(photos.map((p,i)=>[p.id,{widthMm:i?50.8:101.6,heightMm:i?50.8:152.4,quantity:i?6:2,rotation:0,fit:'contain',brightness:110,contrast:95,saturation:85,sharpness:20,flipX:true,crop:{x:.05,y:.1,width:.9,height:.8}}]))});
+        const id=await engine<string>('order',{customer,files:photos.map(p=>p.id),copies:1,paper:'A4',colour:true,price:20000,discount:0,charge:0,printSettings:settings});
         await main.loadURL(index);
         const preview=await main.webContents.executeJavaScript(`(async()=>{
           const wait=async(test)=>{for(let i=0;i<250;i++){const result=test();if(result)return result;await new Promise(r=>setTimeout(r,80))}throw new Error('Photo smoke timeout: '+document.body.innerText.slice(-1500))};
@@ -628,25 +732,34 @@ else void app.whenReady().then(async()=>{
           const select=await wait(()=>document.querySelector('select[aria-label="Order"]'));
           await wait(()=>[...select.options].some(o=>o.value===${JSON.stringify(id)}));
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,${JSON.stringify(id)});select.dispatchEvent(new Event('change',{bubbles:true}));
-          await wait(()=>document.body.innerText.includes('Customer photo library'));
-          const button=text=>[...document.querySelectorAll('.studio-workspace button')].find(b=>b.textContent===text);
-          (await wait(()=>button('Deselect'))).click();
-          await wait(()=>document.querySelector('.print-calculation-summary').innerText.includes('Requested prints\\n0'));
-          (await wait(()=>button('Select All'))).click();
-          await wait(()=>document.querySelector('.print-calculation-summary').innerText.includes('Requested prints\\n8'));
-          const canvas=await wait(()=>document.querySelector('.studio-workspace .preview canvas:not([hidden])'));
-          await wait(()=>!document.body.innerText.includes('Rendering final sheet'));
-          const first=canvas.toDataURL(),summary=document.querySelector('.print-calculation-summary').innerText;
-          const metric=label=>[...document.querySelectorAll('.print-calculation-summary>div')].find(item=>item.querySelector('small')?.textContent===label)?.querySelector('strong')?.textContent;
-          (await wait(()=>button('A4 landscape: 4 photos per side'))).click();
-          await wait(()=>!canvas.hidden&&canvas.width>canvas.height&&metric('Physical photo sheets')==='2'&&metric('Printed photo sides')==='2');
-          (await wait(()=>button('Full page: 1 photo per side'))).click();
-          const sides=await wait(()=>[...document.querySelectorAll('.studio-workspace label')].find(label=>label.textContent.startsWith('Photo printing sides'))?.querySelector('select'));
+          const studio=await wait(()=>document.querySelector('.photo-studio-workspace'));
+          const button=(text,scope=studio)=>[...scope.querySelectorAll('button')].find(b=>b.textContent.trim()===text&&!b.disabled);
+          (await wait(()=>button('Clear selection'))).click();
+          await wait(()=>studio.querySelector('.photo-selection-panel small')?.textContent==='0 selected');
+          (await wait(()=>button('Select all matching photos'))).click();
+          const summary=await wait(()=>{const text=studio.querySelector('.photo-review-panel .panel-head small')?.textContent;return text?.includes('8 prints / 2 sheets')&&text});
+          const canvas=await wait(()=>studio.querySelector('.preview canvas:not([hidden])'));
+          const first=canvas.toDataURL();
+          (await wait(()=>button('More print settings'))).click();
+          const settings=await wait(()=>document.querySelector('dialog[open][aria-label="Photo print settings"]'));
+          (await wait(()=>[...settings.querySelectorAll('button')].find(b=>b.textContent.startsWith('Fill A4 landscape')))).click();
+          await wait(()=>settings.querySelector('.preview small')?.textContent.includes('Landscape')&&studio.querySelector('.photo-review-panel .panel-head small')?.textContent.includes('8 prints / 2 sheets'));
+          (await wait(()=>button('Full page: 1 photo per side',settings))).click();
+          const sides=await wait(()=>[...settings.querySelectorAll('label')].find(label=>label.textContent.startsWith('Print sides'))?.querySelector('select'));
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(sides,'manualLongEdge');sides.dispatchEvent(new Event('change',{bubbles:true}));
-          await wait(()=>!canvas.hidden&&metric('Physical photo sheets')==='4'&&metric('Printed photo sides')==='8'&&document.body.innerText.includes('Sheet 1 / 4 (Front)'));
-          (await wait(()=>button('Next'))).click();
-          await wait(()=>!canvas.hidden&&document.body.innerText.includes('Sheet 1 / 4 (Back)'));
-          return {first,summary,landscapeGridVerified:true,fullPageDuplexVerified:true};
+          await wait(()=>studio.querySelector('.photo-review-panel .panel-head small')?.textContent.includes('8 prints / 4 sheets')&&settings.innerText.includes('Sheet 1 / 4 (Front)'));
+          (await wait(()=>button('Next',settings))).click();
+          await wait(()=>settings.querySelector('.preview canvas:not([hidden])')&&settings.innerText.includes('Sheet 1 / 4 (Back)'));
+          settings.querySelector('button[aria-label="Close details"]').click();
+          const filter=await wait(()=>studio.querySelector('.photo-main-tools select'));
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(filter,'mono');
+          filter.dispatchEvent(new Event('change',{bubbles:true}));
+          await wait(()=>studio.querySelector('.photo-review-panel [role="status"]')?.textContent.includes('Black & white applied to 2 photos'));
+          (await wait(()=>button('Edit photos'))).click();
+          const editor=await wait(()=>document.querySelector('dialog[open][aria-label="Edit photos"]'));
+          await wait(()=>editor.querySelectorAll('.photo-editor-order-item').length===2);
+          editor.querySelector('button[aria-label="Close details"]').click();
+          return {first,summary,landscapeGridVerified:true,fullPageDuplexVerified:true,singleScreenVerified:true};
         })()`);
         const win=new BrowserWindow(printWindowOptions);lock(win);
         try{
@@ -655,7 +768,7 @@ else void app.whenReady().then(async()=>{
           const output=await win.webContents.executeJavaScript(`({first:document.querySelector('.sheet canvas').toDataURL(),sheets:document.querySelectorAll('.sheet').length})`);
           if(output.first!==preview.first)throw new Error('Photo preview and prepared output differ.');
           const exported=await win.webContents.printToPDF({preferCSSPageSize:true,printBackground:true,margins:{top:0,bottom:0,left:0,right:0}});await writeFile(join(root,'photo-prepared.pdf'),exported);
-          await writeFile(join(root,'photo-smoke.json'),JSON.stringify({photos:photos.length,requestedPrints:8,sheets:output.sheets,previewMatchesPrepared:true,pdfExported:true,physicalPrintingExecuted:false,summary:preview.summary,landscapeGridVerified:preview.landscapeGridVerified,fullPageDuplexVerified:preview.fullPageDuplexVerified}));
+          await writeFile(join(root,'photo-smoke.json'),JSON.stringify({photos:photos.length,requestedPrints:8,sheets:output.sheets,previewMatchesPrepared:true,pdfExported:true,physicalPrintingExecuted:false,summary:preview.summary,landscapeGridVerified:preview.landscapeGridVerified,fullPageDuplexVerified:preview.fullPageDuplexVerified,singleScreenVerified:preview.singleScreenVerified}));
           await writeFile(join(root,'photo-studio.png'),(await main.capturePage()).toPNG());
         }finally{printViews.delete(win.webContents.id);win.destroy()}
       }
@@ -713,7 +826,10 @@ else void app.whenReady().then(async()=>{
                   next.click();await new Promise(resolve=>setTimeout(resolve,70));
                 }
               }
-              const button=[...document.querySelectorAll('main button')].find(button=>route==='Customers'?button.textContent.trim().endsWith(check[0]):button.textContent.trim()===check[0]);
+              const button=[...document.querySelectorAll('main button')].find(button=>{
+                const text=button.textContent.trim();
+                return route==='Customers'?text.endsWith(check[0]):route==='Print Studio'?text.startsWith(check[0]):text===check[0];
+              });
               if(!button)throw new Error('Control missing: '+route+' '+check[0]);
               button.click();
               for(let i=0;i<75&&!document.querySelector(check[1]);i++)await new Promise(resolve=>setTimeout(resolve,40));

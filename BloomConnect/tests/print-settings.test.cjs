@@ -1,9 +1,17 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const {buildSync}=require('esbuild');
-const code=buildSync({stdin:{contents:"export * from './packages/printing/plan';export * from './packages/printing/image-processing';export * from './packages/printing/photo-pricing';export * from './packages/printing/settings';export {validatePrinter} from './packages/printing/windows';",resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'cjs'}).outputFiles[0].text;
+const code=buildSync({stdin:{contents:"export * from './packages/printing/plan';export * from './packages/printing/duplex';export * from './packages/printing/image-processing';export * from './packages/printing/photo-pricing';export * from './packages/printing/settings';export * from './packages/printing/raster-budget';export {submissionDuplex,validateSubmissionPrinter} from './packages/printing/capabilities';export {validatePrinter} from './packages/printing/windows';",resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'cjs'}).outputFiles[0].text;
 const mod={exports:{}};new Function('module','exports','require',code)(mod,mod.exports,require);
 const {sharpenPixels,enhancePixels,effectiveDpi,effectivePhotoPricing,quotePhotos,photoSizeKey,planPhotos,reorderPhotoFrames,tightPhotoFrame,constrainPhotoFrame,planDocument,plannedOutput,placementGeometry,analysePixels,normalizedSettings,validatePrinter}=mod.exports;
 const base={printer:'Test',paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'};
 const doc={id:'file',mime:'application/pdf',pages:Array.from({length:10},()=>({widthMm:210,heightMm:297,blank:false,ink:'mono',coverage:0}))};
+test('111 A4 sides fit the raster budget without dropping pages',()=>{
+ const sides=Array.from({length:111},()=>[210,297]);
+ const dpi=mod.exports.fitRasterDpi(sides,150);
+ const pixels=value=>111*Math.round(210*value/25.4)*Math.round(297*value/25.4);
+ assert.ok(dpi>=72&&dpi<150&&pixels(dpi)<=120_000_000&&pixels(dpi+1)>120_000_000);
+ assert.equal(mod.exports.fitRasterDpi([[210,297]],300),300);
+ assert.throws(()=>mod.exports.fitRasterDpi(Array.from({length:200},()=>[420,594]),150),/smaller page ranges/);
+});
 test('three-slide handouts reserve a writable notes column and duplex pad the batch',()=>{
  const plan=planDocument({...base,nup:3,handoutNotes:true,duplex:'longEdge',range:'1-7',marginMm:5,gapMm:4},doc);
  assert.deepEqual(plan.sides.map(side=>[side.placements.length,side.notes?.length??0,side.back]),[[3,3,false],[3,3,true],[1,1,false],[0,0,true]]);
@@ -39,6 +47,48 @@ test('manual duplex prepares matching front and back passes with odd-page paddin
  assert.deepEqual(pages('front'),[1,1,3,3]);
  assert.deepEqual(pages('back'),[2,2,null,null]);
 });
+test('auto binding follows imposed portrait or landscape while explicit edges stay fixed',()=>{
+ const {driverDuplex,resolveDuplex}=mod.exports;
+ assert.equal(driverDuplex('auto',false),'longEdge');
+ assert.equal(driverDuplex('auto',true),'shortEdge');
+ assert.equal(driverDuplex('longEdge',true),'longEdge');
+ assert.equal(driverDuplex('shortEdge',false),'shortEdge');
+ assert.equal(driverDuplex('manualAuto',true),'simplex');
+ assert.equal(resolveDuplex('manualAuto',true),'manualShortEdge');
+ assert.equal(resolveDuplex('manualAuto',false),'manualLongEdge');
+ const mixed={...doc,pages:doc.pages.map((page,index)=>index===0?{...page,widthMm:297,heightMm:210}:page)};
+ const ordinary=planDocument({...base,orientation:'auto',duplex:'auto',nup:2,range:'1-5'},mixed);
+ const [first,back]=ordinary.sides;
+ assert.equal(driverDuplex(ordinary.settings.duplex,first.width>first.height),'shortEdge');
+ assert.equal(back.turn,false);
+ assert.deepEqual(back.placements.map(item=>item.page),[3,4]);
+ const booklet=planDocument({...base,duplex:'auto',nup:2,booklet:true},doc);
+ assert.equal(booklet.sides[1].turn,false);
+ assert.equal(booklet.sides[1].width,297);
+ const manualSettings={...base,duplex:'manualAuto',landscape:true,range:'1-3'};
+ const pages=sideSelection=>plannedOutput(planDocument({...manualSettings,sideSelection},doc)).map(side=>side.placements[0]?.page??null);
+ assert.deepEqual(pages('front'),[1,3]);
+ assert.deepEqual(pages('back'),[2,null]);
+});
+test('automatic duplex respects selected printer capability while manual passes remain available',()=>{
+ const cap={name:'Test',driver:'TOSHIBA Universal PS3 Driver',status:3,error:2,duplex:true,colour:true,papers:[{widthMm:210,heightMm:297}],trays:[],resolutions:[]};
+ assert.doesNotThrow(()=>validatePrinter(normalizedSettings({...base,duplex:'auto'}),cap));
+ const next={...cap,name:'Other',duplex:false};
+ assert.throws(()=>validatePrinter(normalizedSettings({...base,printer:'Other',duplex:'auto'}),next),/Automatic duplex/);
+ assert.doesNotThrow(()=>validatePrinter(normalizedSettings({...base,printer:'Other',duplex:'manualAuto'}),next));
+});
+test('submission preserves booklet sides for virtual devices and uses manual duplex on simplex-only printers',()=>{
+ const virtual={name:'OneNote (Desktop)',driver:'Send to Microsoft OneNote 16 Driver',status:3,error:2,duplex:false,colour:true,papers:[{widthMm:210,heightMm:297}],trays:[],resolutions:[]};
+ const settings=normalizedSettings({...base,printer:virtual.name,booklet:true,nup:2,landscape:true,duplex:'shortEdge'});
+ assert.doesNotThrow(()=>mod.exports.validateSubmissionPrinter(settings,virtual));
+ assert.equal(mod.exports.submissionDuplex(settings.duplex,true,false),'simplex');
+ assert.deepEqual(planDocument(settings,doc).sides.slice(0,2).map(side=>side.back),[false,true]);
+ assert.equal(settings.duplex,'shortEdge');
+ assert.equal(mod.exports.submissionDuplex('auto',false,false),'manualAuto');
+ assert.equal(mod.exports.submissionDuplex('longEdge',false,false),'manualLongEdge');
+ assert.equal(mod.exports.submissionDuplex('shortEdge',false,true),'shortEdge');
+ assert.throws(()=>mod.exports.validateSubmissionPrinter({...settings,paper:'A3'},virtual),/paper size/);
+});
 test('booklet padding and long-edge backside turn are explicit',()=>{
  const plan=planDocument({...base,booklet:true,nup:2,duplex:'longEdge'},doc);
  assert.equal(plan.sides.length,6);assert.equal(plan.sides[1].turn,true);assert.equal(plan.sides[0].width,297);
@@ -62,6 +112,18 @@ test('capability gates reject unsupported colour, paper, duplex, tray and offlin
  assert.doesNotThrow(()=>validatePrinter(normalizedSettings(base),caps));
  for(const change of [{colour:true},{duplex:'longEdge'},{paper:'A3'},{tray:1}])assert.throws(()=>validatePrinter(normalizedSettings({...base,...change}),caps));
  assert.throws(()=>validatePrinter(normalizedSettings(base),{...caps,offline:true}));
+ for(const error of [3,5])assert.doesNotThrow(()=>validatePrinter(normalizedSettings(base),{...caps,error}));
+ for(const error of [4,6,7,8,9])assert.throws(()=>validatePrinter(normalizedSettings(base),{...caps,error}),/reports an error/);
+ assert.doesNotThrow(()=>validatePrinter(normalizedSettings(base),{...caps,papers:[]}));
+ assert.throws(()=>validatePrinter(normalizedSettings({...base,paper:'Custom',customPaper:{widthMm:210,heightMm:297}}),{...caps,papers:[]}),/paper size/);
+});
+test('Toshiba 257 low-toner warning permits supported jobs while paper and offline checks still apply',()=>{
+ const printer='TOSHIBA e-STUDIO257';
+ const supported={name:printer,driver:'TOSHIBA Universal Printer 2',offline:false,status:3,error:5,colour:false,duplex:true,papers:[{widthMm:210,heightMm:297}],trays:[],resolutions:[]};
+ assert.doesNotThrow(()=>validatePrinter(normalizedSettings({...base,printer,duplex:'longEdge'}),supported));
+ assert.throws(()=>validatePrinter(normalizedSettings({...base,printer,paper:'A3'}),supported),/paper size/);
+ assert.throws(()=>validatePrinter(normalizedSettings({...base,printer,colour:true}),supported),/colour output/);
+ assert.throws(()=>validatePrinter(normalizedSettings({...base,printer}),{...supported,offline:true}),/offline/);
 });
 
 const photoDoc=id=>({id,mime:'image/jpeg',pages:[{widthMm:100,heightMm:150,blank:false,ink:'colour',coverage:1}]});
@@ -167,6 +229,13 @@ test('A4 landscape fits eight photos in two ordered 2×2 sides',()=>{
  assert.deepEqual(layout.sides.map(side=>[side.width,side.height]),[[297,210],[297,210]]);
  assert.deepEqual(layout.sides.map(side=>side.placements.map(photo=>photo.file)),[['1','2','3','4'],['5','6','7','8']]);
  assert.deepEqual(layout.sides[0].placements[3].box,{x:149.5,y:106,width:142.5,height:99});
+});
+test('A4 photo grid honors a requested count below its available cells',()=>{
+ const photos=Array.from({length:8},(_,index)=>photoDoc(String(index+1)));
+ const layout=planPhotos({...base,photoGrid:{rows:3,columns:2,capacity:5},marginMm:0,gapMm:0},photos);
+ assert.equal(layout.settings.photoGrid.capacity,5);
+ assert.deepEqual(layout.sides.map(side=>side.placements.map(photo=>photo.file)),[['1','2','3','4','5'],['6','7','8']]);
+ assert.deepEqual(layout.sides[0].placements[0].cutBox,layout.sides[1].placements[0].cutBox);
 });
 test('full-page photo duplex preserves front and back order and charges per physical sheet',()=>{
  const photos=['b','a','c'].map(photoDoc);

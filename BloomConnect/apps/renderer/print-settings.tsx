@@ -4,37 +4,81 @@ import type {PrinterCapabilities} from '../../packages/printing/windows';
 import type {ManualFeedProfile,PrintSettingsInput} from '../../packages/printing/settings';
 import {useQueryClient} from '@tanstack/react-query';
 import {isVirtualPrinter} from '../../packages/printing/capabilities';
+import {duplexEdge,isManualDuplex,type DuplexMode} from '../../packages/printing/duplex';
 import type {PricingPolicy} from '../../packages/printing/calculation';
-import {useData,Button} from './context';
+import {useData,Button,money} from './context';
 import {DetailDrawer} from './design';
 
+export function DuplexOptions({allowOff=true}:{allowOff?:boolean}){
+ return <>
+  <option value="simplex" disabled={!allowOff}>Off — Single-sided</option>
+  <option value="auto">Auto — Recommended</option>
+  <option value="longEdge">Flip on Long Edge</option>
+  <option value="shortEdge">Flip on Short Edge</option>
+  <option value="manualAuto">Manual Double-Sided</option>
+  <option value="manualLongEdge">Manual — Long Edge</option>
+  <option value="manualShortEdge">Manual — Short Edge</option>
+ </>;
+}
+
+export function DuplexTest({settings,unavailable=false,onDone}:{settings:Pick<PrintSettingsInput,'printer'|'paper'|'customPaper'|'orientation'|'landscape'|'duplex'>;unavailable?:boolean;onDone?:()=>Promise<unknown>}){
+ const {error}=useData();
+ const [testing,setTesting]=useState(false);
+ return <Button className="secondary" disabled={testing||unavailable||!settings.printer||settings.duplex==='simplex'||settings.orientation==='auto'||isVirtualPrinter(settings.printer)}
+  onClick={async()=>{
+   const {printer,paper,customPaper,orientation,landscape,duplex}=settings;
+   setTesting(true);
+   try{await window.bloom.call('testDuplex',{printer,paper,customPaper,orientation,landscape,duplex});await onDone?.()}
+   catch(e){error(e)}finally{setTesting(false)}
+  }}>{testing?'Testing duplex…':'Test Double-Sided Printing'}</Button>;
+}
+
 export function BookletWizard({document,settings,onClose,apply}:{document:string;settings:Input<'print'>;onClose:()=>void;apply:(value:Partial<PrintSettingsInput>)=>void}){
- const [step,setStep]=useState(0);
  const [paper,setPaper]=useState<'A3'|'A4'|'A5'|'Custom'>(settings.paper==='A3'||settings.paper==='A5'||settings.paper==='Custom'?settings.paper:'A4');
  const [width,setWidth]=useState(settings.customPaper?settings.customPaper.heightMm/2:148.5),[height,setHeight]=useState(settings.customPaper?.widthMm??210);
  const [binding,setBinding]=useState(settings.binding??'left'),[finish,setFinish]=useState(settings.bookletFinish??'fold');
- const [signature,setSignature]=useState(settings.signaturePages??0),[duplex,setDuplex]=useState<PrintSettingsInput['duplex']>(settings.duplex==='simplex'?'shortEdge':settings.duplex);
+ const [signature,setSignature]=useState(settings.signaturePages??0),[duplex,setDuplex]=useState<DuplexMode>(settings.duplex==='simplex'?'auto':settings.duplex);
  const [margin,setMargin]=useState(settings.marginMm??0),[gutter,setGutter]=useState(settings.gutterMm??0),[creep,setCreep]=useState(settings.bookletCreepMm??0);
- const steps=['Document and paper','Binding and signatures','Duplex','Margins and creep','Review'];
  const valid=paper!=='Custom'||width>=10&&width<=1000&&height>=20&&height<=2000;
- return <DetailDrawer title="Booklet Wizard" presentation="center" onClose={onClose}><div className="stack">
- <h3>{step+1} / {steps.length} · {steps[step]}</h3>
- {step===0&&<><p>{document}</p><label>Finished size and printing paper<select value={paper} onChange={e=>setPaper(e.target.value as typeof paper)}><option value="A4">A5 with A4 paper</option><option value="A3">A4 with A3 paper</option><option value="A5">A6 with A5 paper</option><option value="Custom">Custom finished size</option></select></label>{paper==='Custom'&&<div className="form-grid"><label>Finished width (mm)<input type="number" min="10" max="1000" value={width} onChange={e=>setWidth(Number(e.target.value))}/></label><label>Finished height (mm)<input type="number" min="20" max="2000" value={height} onChange={e=>setHeight(Number(e.target.value))}/></label></div>}</>}
- {step===1&&<><label>Binding<select value={binding} onChange={e=>setBinding(e.target.value as typeof binding)}><option value="left">Left bound</option><option value="right">Right bound</option></select></label><label>Signature pages<select value={signature} onChange={e=>setSignature(Number(e.target.value))}><option value="0">Single signature</option>{Array.from({length:32},(_,i)=>(i+1)*4).map(size=><option key={size}>{size}</option>)}</select></label><label>Manual finishing<select value={finish} onChange={e=>setFinish(e.target.value as typeof finish)}><option value="fold">Fold only</option><option value="handStaple">Fold and staple by hand</option></select></label></>}
- {step===2&&<><label>Duplex<select value={duplex} onChange={e=>setDuplex(e.target.value as typeof duplex)}><option value="shortEdge">Automatic, short edge</option><option value="longEdge">Automatic, long edge</option><option value="manualShortEdge">Manual, short edge</option><option value="manualLongEdge">Manual, long edge</option></select></label><p>Manual duplex pauses between passes for reloading. Follow the selected printer's tested feed instructions.</p></>}
- {step===3&&<div className="form-grid">{([['Margins',margin,setMargin,40],['Gutter',gutter,setGutter,40],['Creep per nested sheet',creep,setCreep,2]] as const).map(([label,value,set,max])=><label key={label}>{label} (mm)<input type="number" min="0" max={max} step=".1" value={value} onChange={e=>set(Math.max(0,Math.min(max,Number(e.target.value))))}/></label>)}</div>}
- {step===4&&<><p>Apply these settings to review every front and back, padding, physical sheets and configured finishing charges in Print Studio.</p><p>Keep signatures in order. Fold on the center line{finish==='handStaple'?' and staple through the fold':''}. Confirm printing from Print Queue after checking the output.</p></>}
- <div className="actions"><Button className="secondary" disabled={step===0} onClick={()=>setStep(step-1)}>Back</Button>{step<steps.length-1?<Button disabled={!valid} onClick={()=>setStep(step+1)}>Next</Button>:<Button disabled={!valid} onClick={()=>{apply({paper,customPaper:paper==='Custom'?{widthMm:height,heightMm:width*2}:undefined,booklet:true,bookletFinish:finish,binding,signaturePages:signature||undefined,bookletCreepMm:creep,gutterMm:gutter,marginMm:margin,landscape:true,orientation:'landscape',duplex,nup:2,grid:undefined,poster:undefined,documentFrame:undefined,handoutNotes:false,margins:undefined});onClose()}}>Apply and preview</Button>}</div>
- </div></DetailDrawer>;
+ const content=<div className="stack">
+ <fieldset className="stack booklet-settings-group"><legend>Paper and finished size</legend><p>{document}</p><label>Finished size and printing paper<select value={paper} onChange={e=>setPaper(e.target.value as typeof paper)}><option value="A4">A5 with A4 paper</option><option value="A3">A4 with A3 paper</option><option value="A5">A6 with A5 paper</option><option value="Custom">Custom finished size</option></select></label>{paper==='Custom'&&<div className="form-grid"><label>Finished width (mm)<input type="number" min="10" max="1000" value={width} onChange={e=>setWidth(Number(e.target.value))}/></label><label>Finished height (mm)<input type="number" min="20" max="2000" value={height} onChange={e=>setHeight(Number(e.target.value))}/></label></div>}</fieldset>
+ <fieldset className="form-grid booklet-settings-group"><legend>Binding and finishing</legend><label>Binding<select value={binding} onChange={e=>setBinding(e.target.value as typeof binding)}><option value="left">Left bound</option><option value="right">Right bound</option></select></label><label>Signature pages<select value={signature} onChange={e=>setSignature(Number(e.target.value))}><option value="0">Single signature</option>{Array.from({length:32},(_,i)=>(i+1)*4).map(size=><option key={size}>{size}</option>)}</select></label><label>Manual finishing<select value={finish} onChange={e=>setFinish(e.target.value as typeof finish)}><option value="fold">Fold only</option><option value="handStaple">Fold and staple by hand</option></select></label></fieldset>
+ <fieldset className="stack booklet-settings-group"><legend>Double-sided printing</legend><label>Duplex<select value={duplex} onChange={e=>setDuplex(e.target.value as typeof duplex)}><DuplexOptions allowOff={false}/></select></label>{isManualDuplex(duplex)&&<small>Reload the sheets when prompted, using the printer?s tested feed instructions.</small>}</fieldset>
+ <fieldset className="booklet-settings-group"><legend>Margins and creep</legend><div className="form-grid">{([['Margins',margin,setMargin,40],['Gutter',gutter,setGutter,40],['Creep per nested sheet',creep,setCreep,2]] as const).map(([label,value,set,max])=><label key={label}>{label} (mm)<input type="number" min="0" max={max} step=".1" value={value} onChange={e=>set(Math.max(0,Math.min(max,Number(e.target.value))))}/></label>)}</div></fieldset>
+
+  <div className="booklet-cover-preview" role="img" aria-label="Fold the cover sheet between the front and back covers">
+   <span>{binding==='left'?'Back cover':'Front cover'}</span><span>{binding==='left'?'Front cover':'Back cover'}</span>
+  </div>
+  <p>Fold at the centre line{finish==='handStaple'?' and staple through the fold':''}. Keep each group of folded sheets in order.</p>
+ <div className="actions booklet-settings-actions"><Button className="secondary" onClick={onClose}>Cancel</Button><Button disabled={!valid} onClick={()=>{apply({paper,customPaper:paper==='Custom'?{widthMm:height,heightMm:width*2}:undefined,booklet:true,bookletFinish:finish,binding,signaturePages:signature||undefined,bookletCreepMm:creep,gutterMm:gutter,marginMm:margin,landscape:true,orientation:'landscape',duplex,nup:2,grid:undefined,poster:undefined,documentFrame:undefined,handoutNotes:false,margins:undefined});onClose()}}>Apply and preview</Button></div>
+ </div>;
+ return <DetailDrawer title="Booklet Wizard" presentation="center" onClose={onClose}>{content}</DetailDrawer>;
+}
+
+export function PrintEstimate({subtotal,total,adjustments,editable,label='Estimated total'}:{
+ subtotal?:number;total?:number;adjustments?:{charge:number;discount:number};editable?:{charge:number;discount:number;setCharge:(value:number)=>void;setDiscount:(value:number)=>void;disabled?:boolean};label?:string;
+}){
+ return <div className="stack print-estimate">
+  {subtotal!==undefined&&<div className="print-estimate-line"><span>Print subtotal</span><strong>{money(subtotal)}</strong></div>}
+  {editable?<fieldset className="form-grid print-estimate-fields" disabled={editable.disabled}>
+   <label>Additional charge (LKR)<input type="number" min="0" max="1000000" step=".01" value={editable.charge||''} placeholder="0.00" onChange={e=>editable.setCharge(Number(e.target.value))}/></label>
+   <label>Discount (LKR)<input type="number" min="0" max="1000000" step=".01" value={editable.discount||''} placeholder="0.00" onChange={e=>editable.setDiscount(Number(e.target.value))}/></label>
+  </fieldset>:adjustments&&<>
+   <div className="print-estimate-line"><span>Additional charge</span><strong>{money(adjustments.charge)}</strong></div>
+   <div className="print-estimate-line"><span>Discount</span><strong>{money(adjustments.discount)}</strong></div>
+  </>}
+  <div className="total"><span>{label}</span><strong>{total===undefined?'?':money(total)}</strong></div>
+ </div>;
 }
 
 function ManualFeedSettings({settings,change}:{settings:Input<'print'>;change:(value:Partial<PrintSettingsInput>)=>void}){
  const {run,error}=useData();
  const [profile,setProfile]=useState<ManualFeedProfile>({first:'front',reverseSecond:false,rotateSecond:false,instructions:''});
  const [saved,setSaved]=useState(false),[verified,setVerified]=useState(false);
- const edge=settings.duplex==='manualLongEdge'?'long' as const:'short' as const;
- const enabled=!!settings.printer&&settings.duplex.startsWith('manual')&&settings.orientation!=='auto'&&!isVirtualPrinter(settings.printer);
- const context={printer:settings.printer,landscape:settings.orientation==='landscape'||settings.orientation!=='portrait'&&settings.landscape,edge};
+ const landscape=settings.booklet||settings.orientation==='landscape'||settings.orientation!=='portrait'&&settings.landscape;
+ const edge=duplexEdge(settings.duplex,landscape);
+ const enabled=!!settings.printer&&isManualDuplex(settings.duplex)&&settings.orientation!=='auto'&&!isVirtualPrinter(settings.printer);
+ const context={printer:settings.printer,landscape,edge};
  useEffect(()=>{
   let current=true;setSaved(false);setVerified(false);
   setProfile({first:'front',reverseSecond:false,rotateSecond:false,instructions:''});

@@ -25,7 +25,8 @@ export async function convertOfficeDocument(script:string,input:string,mode:'pag
   await writeFile(request,JSON.stringify({input,output,mode,includeHidden}),'utf8');
   await new Promise<void>((resolve,reject)=>execFile('powershell.exe',['-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass','-File',script,'-InputFile',request],
    {windowsHide:true,timeout:90000,maxBuffer:1024*1024,encoding:'utf8'},(error,_,stderr)=>error
-    ?reject(new Error(error.killed?'Office conversion timed out. Check for an Office dialog or save a PDF from Office.':(stderr||error.message).slice(0,1200)))
+    ?reject(new Error(error.killed?'Office conversion timed out. Check for an Office dialog or save a PDF from Office.':
+      stderr.split(/\r?\n/).find(line=>line.trim())?.trim().slice(0,400)||'Office could not convert the document. Open it in Office and export it to PDF.'))
     :resolve()));
   if((await stat(output)).size>32*1024*1024)throw new Error('The converted PDF exceeds 32 MB. Split the source document.');
   const bytes=await readFile(output);

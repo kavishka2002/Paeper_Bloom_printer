@@ -1,5 +1,5 @@
 import {isVirtualPrinter} from '../../packages/printing/capabilities';
-import {useEffect,useState,type ReactNode} from 'react';
+import {lazy,Suspense,useEffect,useRef,useState,type ReactNode} from 'react';
 import {createRoot} from 'react-dom/client';
 import {createPortal} from 'react-dom';
 import {QueryClient,QueryClientProvider,useQuery} from '@tanstack/react-query';
@@ -23,10 +23,19 @@ import '@fontsource/noto-sans-sinhala/600.css';
 import './style.css';
 import './theme.css';
 const client=new QueryClient({defaultOptions:{queries:{retry:1,staleTime:2000}}});
+const PdfWorkspace=lazy(()=>import('./pdf-workspace').then(module=>({default:module.PdfWorkspace})));
 function App(){
  const s=useWorkspace(),[notice,setNotice]=useState<{text:string;error:boolean}>(),[menu,setMenu]=useState(''),[busy,setBusy]=useState(0);
  const [collapsed,setCollapsed]=useState(()=>localStorage.getItem('sidebar')==='collapsed');
  const snapshot=useQuery({queryKey:['data'],queryFn:()=>window.bloom.call('snapshot',null),refetchInterval:30000});
+ const openedWhatsApp=useRef(false);
+ const connectedToWeb=snapshot.data?.connection.mode==='web'&&snapshot.data.connection.status==='Connected';
+ useEffect(()=>{
+  if(!connectedToWeb||openedWhatsApp.current)return;
+  openedWhatsApp.current=true;
+  const workspace=useWorkspace.getState();
+  if(workspace.view==='Dashboard'||workspace.view==='Automation Engine')workspace.set({view:'WhatsApp'});
+ },[connectedToWeb]);
  const printer=useQuery({queryKey:['printers'],queryFn:()=>window.bloom.call('printers',null),refetchInterval:25000});
  const startupSettled=!!snapshot.data||snapshot.isError;
  useEffect(()=>{if(startupSettled)void window.startupReady?.().catch(()=>{})},[startupSettled]);
@@ -44,11 +53,11 @@ function App(){
  };
  const run:React.ContextType<typeof ctx>['run']=async(op,input,message)=>{
   setBusy(n=>n+1);setNotice(undefined);
-  try{const result=await window.bloom.call(op,input);if(op==='savePrintPdf'&&result===false)return false;await refresh();const text=message||(result===true&&op==='backup'?'Backup saved':result===true&&op==='receipt'?'Receipt PDF saved':'');if(text)setNotice({text,error:false});return true}
+  try{const result=await window.bloom.call(op,input);if(result===false&&['savePrintPdf','saveAttachment','bill','backup','receipt'].includes(op))return false;await refresh();const text=message||(result===true&&op==='backup'?'Backup saved':result===true&&op==='receipt'?'Receipt PDF saved':'');if(text)setNotice({text,error:false});return true}
   catch(e){error(e);return false}finally{setBusy(n=>n-1)}
  };
  const toast=notice&&<div className={'toast '+(notice.error?'error':'')} role={notice.error?'alert':'status'}>{notice.error?<AlertCircle size={18}/>:<Check size={18}/>}<span>{notice.text}</span><button type="button" aria-label="Dismiss" onClick={()=>setNotice(undefined)}><X size={16}/></button></div>;
- const activeDialog=notice?.error?document.querySelector('dialog[open] .drawer-content'):null;
+ const activeDialog=notice?[...document.querySelectorAll('dialog[open]')].at(-1)?.querySelector('.drawer-content'):null;
  const status=toast&&activeDialog?createPortal(toast,activeDialog):toast;
  const data=snapshot.data;
  if(!data)return <div className="setup"><Panel><h1>BloomConnect</h1>{snapshot.isError?<><p role="alert">{snapshot.error.message}</p><Button onClick={()=>void snapshot.refetch()}>Retry</Button></>:<div role="status" aria-label="Loading workspace" className="loading-stack"><i className="skeleton"/><i className="skeleton"/><i className="skeleton"/></div>}</Panel></div>;
@@ -57,7 +66,7 @@ function App(){
  const settings=data.settings,isSi=settings.language==='si';
  const title=pageTitle(s.view,isSi);
  const group=groups.find(section=>section.items.some(item=>item[0]===s.view));
- const pages:Record<string,ReactNode>={Dashboard:<Dashboard/>,WhatsApp:<InboxView/>,Customers:<Customers/>,Documents:<Documents/>,Automation:<Automation/>, 'Automation Engine':<ConnectionPage/>,'Auto Replies':<AutoReplies/>,'Engine Logs':<EngineLogs/>, 'Print Studio':<Studio/>,'Print Queue':<Queue/>,'Print History':<Queue history/>,Orders:<Orders/>,Payments:<Payments/>,Reports:<Reports/>,Settings:<Settings/>,Backup:<BackupPage/>};
+ const pages:Record<string,ReactNode>={Dashboard:<Dashboard/>,WhatsApp:<InboxView/>,Customers:<Customers/>,Documents:<Documents/>,Automation:<Automation/>, 'Automation Engine':<ConnectionPage/>,'Auto Replies':<AutoReplies/>,'Engine Logs':<EngineLogs/>, 'PDF Studio':<Suspense fallback={<p role="status">Loading PDF Studio...</p>}><PdfWorkspace/></Suspense>,'Print Studio':<Studio/>,'Print Queue':<Queue/>,'Print History':<Queue history/>,Orders:<Orders/>,Payments:<Payments/>,Reports:<Reports/>,Settings:<Settings/>,Backup:<BackupPage/>};
  const hits=s.search.trim()?[
  ...data.customers.filter(c=>match(s.search,c.name,c.phone)).slice(0,4).map(c=>({text:c.name,view:'Customers',go:()=>s.set({customer:c.id})})),
  ...data.attachments.filter(a=>match(s.search,a.name)).slice(0,4).map(a=>({text:a.name,view:'Documents',go:()=>s.set({attachment:a.id})})),
@@ -69,7 +78,7 @@ function App(){
  return <ctx.Provider value={providers}><div className="app-shell" data-collapsed={collapsed}>
  <Sidebar shop={settings.shop} status={data.connection.status} unreadCount={data.messages.filter(unreadInboxMessage).length} sinhala={isSi} collapsed={collapsed} toggle={()=>setCollapsed(!collapsed)} go={go}/>
  <div className="workspace"><header className="topbar">
- <div className="breadcrumbs" aria-label="Breadcrumb"><span>{isSi?group?.si:group?.label}</span><ChevronRight size={13}/><strong>{title}</strong></div>
+ <div className="breadcrumbs" aria-label="Breadcrumb">{s.view!=='Dashboard'&&<><button type="button" className="text-button" onClick={()=>go('Dashboard')}>{isSi?'මුල් පිටුව':'Dashboard'}</button><ChevronRight size={13}/></>}<span>{isSi?group?.si:group?.label}</span><ChevronRight size={13}/><strong>{title}</strong></div>
  <div className="global-search"><Search size={16}/><input placeholder="Search customers, files, orders…" aria-label="Global search" value={s.search} onFocus={()=>setMenu('search')} onChange={e=>{s.set({search:e.target.value});setMenu('search')}}/>{menu==='search'&&s.search&&<div className="dropdown search-results">{hits.length?hits.map((h,i)=><button key={i} type="button" onClick={()=>{h.go();go(h.view)}}>{h.text}<small>{pageTitle(h.view,isSi)}</small></button>):<p>No matches</p>}</div>}</div>
  <div className="top-actions"><button type="button" className="top-status" onClick={()=>go('Automation Engine')} title={'WhatsApp · '+data.connection.status}><MessageCircle size={14}/><i className={connected?'online':''}/><span>{data.connection.status}</span></button>
  <button type="button" className="top-status printer-status" onClick={()=>go('Settings')} title={printerReady?'Printer ready':'Printer setup'}><Printer size={15}/><span>{printerReady?'Printer ready':'Printer setup'}</span></button>

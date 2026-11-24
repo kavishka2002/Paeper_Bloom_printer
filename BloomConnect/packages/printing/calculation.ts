@@ -1,9 +1,15 @@
+import {duplexModes} from './duplex';
 import {z} from 'zod';
-import {paperSizes,paperNames} from './paper';
+import {paperSizes,paperNames,type Paper} from './paper';
 export {paperSizes} from './paper';
 
 const count=z.number().int().min(1).max(10000);
 const money=z.number().int().min(0).max(100000000);
+export const paperRateSizes=['A4','A3','Legal'] as const;
+export const paperDocumentRatesSchema=z.partialRecord(z.enum(paperRateSizes),z.object({
+  mono:money.optional(),colour:money.optional(),duplexMono:money.optional(),duplexColour:money.optional(),samePrice:z.boolean().optional()
+}));
+export type DocumentRates={mono:number;colour:number;duplexMono?:number;duplexColour?:number;paperRates?:z.infer<typeof paperDocumentRatesSchema>};
 export const pricingSchema=z.object({
   basis:z.enum(['sheet','side','page','photo','booklet']).default('page'),
   mono:money,colour:money,
@@ -19,7 +25,7 @@ export const calculationSchema=z.object({
   filter:z.enum(['all','odd','even']).default('all'),reverse:z.boolean().default(false),
   copies:z.number().int().min(1).max(10000).default(1),
   pagesPerSide:z.number().int().min(1).max(64).default(1),
-  duplex:z.enum(['simplex','longEdge','shortEdge','manualLongEdge','manualShortEdge']).default('simplex'),
+  duplex:z.enum(duplexModes).default('simplex'),
   imposition:z.enum(['ordinary','booklet','poster']).default('ordinary'),binding:z.enum(['left','right']).default('left'),
   signaturePages:z.number().int().min(4).max(128).multipleOf(4).optional(),
   posterTiles:z.array(count).min(1).max(200).optional(),
@@ -38,12 +44,16 @@ export const calculationSchema=z.object({
 export type CalculationInput=z.input<typeof calculationSchema>;
 export type PricingPolicy=z.input<typeof pricingSchema>;
 export function documentPricing(
-  rates:{mono:number;colour:number;duplexMono?:number;duplexColour?:number},
+  rates:DocumentRates,
   duplex:CalculationInput['duplex'],
-  basis:'sheet'|'side'|'page'='sheet'
+  basis:'sheet'|'side'|'page'='sheet',
+  paper?:Paper
 ):PricingPolicy{
-  if(!duplex||duplex==='simplex')return {basis,mono:rates.mono,colour:rates.colour};
-  return {basis:'sheet',mono:rates.duplexMono??rates.mono,colour:rates.duplexColour??rates.colour};
+  const sizeRates=paper==='A4'||paper==='A3'||paper==='Legal'?rates.paperRates?.[paper]:undefined;
+  if(!duplex||duplex==='simplex')return {basis,mono:sizeRates?.mono??rates.mono,colour:sizeRates?.colour??rates.colour};
+  if(sizeRates?.samePrice)return {basis:'sheet',mono:sizeRates.mono??rates.mono,colour:sizeRates.colour??rates.colour};
+  return {basis:'sheet',mono:sizeRates?.duplexMono??sizeRates?.mono??rates.duplexMono??rates.mono,
+    colour:sizeRates?.duplexColour??sizeRates?.colour??rates.duplexColour??rates.colour};
 }
 export type ImposedSide={pages:(number|null)[];ink:'mono'|'colour'|'blank'};
 

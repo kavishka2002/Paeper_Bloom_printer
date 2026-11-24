@@ -17,7 +17,13 @@ if($request.widthMm -and $request.heightMm){
 $page.Landscape=[bool]$request.landscape
 if($Action -eq 'capabilities'){
   $printerName=$settings.PrinterName.Replace('\','\\').Replace("'","\'")
-  $device=Get-CimInstance -ClassName Win32_Printer -Filter "Name = '$printerName'" | Select-Object -First 1
+  # Driver capabilities remain usable when Windows does not expose WMI status.
+  $device=$null
+  try {
+    $device=Get-CimInstance -ClassName Win32_Printer -Filter "Name = '$printerName'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 1
+  } catch {
+    $device=$null
+  }
   $area=$page.PrintableArea
   $size=$page.Bounds
   $left=[Math]::Max(0,$area.X*0.254);$top=[Math]::Max(0,$area.Y*0.254)
