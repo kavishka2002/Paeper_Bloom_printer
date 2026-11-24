@@ -15,14 +15,15 @@ export function InboxView(){
  const webConnected=data.connection.mode==='web'&&data.connection.status==='Connected';
  const selectedInInbox=selectedCustomer&&(!accountScoped||data.messages.some(message=>message.customer_id===selectedCustomer.id&&visibleInboxMessage(message)))?selectedCustomer:undefined;
  const [previewCustomer,setPreviewCustomer]=useState<string>();
- const previewInInbox=webConnected&&data.messages.some(message=>message.customer_id===previewCustomer&&visibleInboxMessage(message))?previewCustomer:undefined;
- const latestCustomer=webConnected&&!selectedInInbox?data.messages.findLast(visibleInboxMessage)?.customer_id:undefined;
+ const previewInInbox=data.connection.mode==='web'&&data.messages.some(message=>message.customer_id===previewCustomer&&visibleInboxMessage(message))?previewCustomer:undefined;
+ const latestCustomer=data.connection.mode==='web'&&!selectedInInbox?data.messages.findLast(visibleInboxMessage)?.customer_id:undefined;
  const active=selectedInInbox??data.customers.find(customer=>customer.id===(previewInInbox??latestCustomer));
  useEffect(()=>{if(!previewInInbox&&latestCustomer)setPreviewCustomer(latestCustomer)},[previewInInbox,latestCustomer]);
  const [syncingChat,setSyncingChat]=useState('');
  const [chatSync,setChatSync]=useState<{id:string;text:string}>();
  const [selectedFiles,setSelectedFiles]=useState<string[]>([]);
  const [filePreview,setFilePreview]=useState<Attachment>();
+ const [detailsCustomer,setDetailsCustomer]=useState('');
  const [sending,setSending]=useState(false);
  const [convertingOffice,setConvertingOffice]=useState('');
  async function printOffice(file:Attachment){
@@ -58,11 +59,12 @@ export function InboxView(){
   if(!active||!files.length)return;
   if(files.length>40){error(new Error('Select up to 40 files for one order.'));return}
   const ids=files.map(file=>file.id);
+  setDetailsCustomer('');
   if(files[0].mime==='application/pdf')state.set({pdfPrintAttachment:ids[0],pdfBatchDraft:batch||ids.length>1?ids:[]});
   else state.set({view:'Print Studio',job:'',customer:active.id,photoStudio:true,photoDraft:ids,lightenPhotoDraft:false});
  }
  function showFile(file:Attachment){
-  if(file.status==='Ready')setFilePreview(file);
+  if(file.status==='Ready'){setDetailsCustomer('');setFilePreview(file)}
   else if(['Failed','Available to download'].includes(file.status))void run('retryMedia',{id:file.id});
   else state.set({attachment:file.id,view:'Documents'});
  }
@@ -119,14 +121,15 @@ export function InboxView(){
   if(openedCustomer.current!==active?.id){openedCustomer.current=active?.id;followNewest.current=true}
   if(history.current&&followNewest.current)history.current.scrollTop=history.current.scrollHeight;
  },[active?.id,newest]);
- return <div className="stack">
- <div className="connection" data-connected={webConnected||data.connection.status==="API reachable"}><div><strong>WhatsApp · {data.connection.status}</strong>{data.connection.detail&&<p>{data.connection.detail}</p>}{!webConnected&&!data.connection.detail&&data.connection.status!=='API reachable'&&<p>Connect WhatsApp to load chats and documents.</p>}</div>
- {!webConnected&&data.connection.status!=='API reachable'&&<Button className="secondary" onClick={()=>state.set({view:'Automation Engine'})}>Open connection settings</Button>}</div>
+ const connected=webConnected||data.connection.status==="API reachable";
+ return <div className="stack whatsapp-inbox" data-connected={connected}>
+ {!connected&&<div className="connection"><div><strong>WhatsApp · {data.connection.status}</strong>{data.connection.detail&&<p>{data.connection.detail}</p>}{!webConnected&&!data.connection.detail&&data.connection.status!=='API reachable'&&<p>Connect WhatsApp to load chats and documents.</p>}</div>
+ {!webConnected&&data.connection.status!=='API reachable'&&<Button className="secondary" onClick={()=>state.set({view:'Automation Engine'})}>Open connection settings</Button>}</div>}
  <div className="inbox-layout panel">
  <aside className="conversation-list"><div className="padded stack"><h2>Conversations</h2>{data.connection.mode==="web"&&data.connection.status==="Connected"&&<><Button className="secondary" disabled={data.connection.sync?.startsWith("Syncing")} onClick={()=>void run("webSync",null)}>Sync recent chats</Button>{data.connection.sync&&<p className="subtle" role="status">{data.connection.sync}</p>}</>}<input aria-label="Find a conversation" placeholder="Find a conversation" value={query} onChange={e=>setQuery(e.target.value)}/><label className="check"><input type="checkbox" checked={unread} onChange={e=>setUnread(e.target.checked)}/> Unread only</label></div>
  {conversations.map(({c,list})=><button key={c.id} className={'conversation '+(active?.id===c.id?'selected':'')} onClick={()=>{state.set({customer:c.id});setDraft('');setSelectedFiles([]);setFilePreview(undefined)}}><span className="avatar">{c.name[0]}</span><span><strong>{c.name}</strong><small>{c.phone}</small><small>{list.at(-1)?.body||list.at(-1)?.kind}</small><small>{stamp(list.at(-1)?.created??c.last)}</small></span>{list.some(unreadInboxMessage)&&<i className="unread unread-count" aria-label={list.filter(unreadInboxMessage).length+" unread"}>{list.filter(unreadInboxMessage).length}</i>}</button>)}
  {!conversations.length&&<Empty title="No conversations found"><p>Search for a customer by name or number, or sync recent chats after connecting.</p></Empty>}</aside>
- <section className="chat"><label className="check quick-pdf-toggle"><input type="checkbox" checked={state.autoPdfPrint} onChange={event=>{const enabled=event.target.checked;localStorage.setItem('autoPdfPrint',enabled?'on':'off');state.set({autoPdfPrint:enabled})}}/> Open print preview for new PDFs</label>{active?<><div className="chat-title"><span className="avatar">{active.name[0]}</span><div><strong>{active.name}</strong><p>{active.phone}</p></div><Badge>{data.connection.status}</Badge></div><div ref={history} className="chat-history" onScroll={e=>{const area=e.currentTarget;followNewest.current=area.scrollHeight-area.scrollTop-area.clientHeight<60}}>{messages.map(m=>{
+ <section className="chat"><label className="check quick-pdf-toggle"><input type="checkbox" checked={state.autoPdfPrint} onChange={event=>{const enabled=event.target.checked;localStorage.setItem('autoPdfPrint',enabled?'on':'off');state.set({autoPdfPrint:enabled})}}/> Open print preview for new PDFs</label>{active?<><div className="chat-title"><span className="avatar">{active.name[0]}</span><div><strong>{active.name}</strong><p>{active.phone}</p></div><Button className="secondary chat-details-toggle" onClick={()=>setDetailsCustomer(active.id)}>Customer details</Button></div><div ref={history} className="chat-history" onScroll={e=>{const area=e.currentTarget;followNewest.current=area.scrollHeight-area.scrollTop-area.clientHeight<60}}>{messages.map(m=>{
  const attachments=filesByMessage.get(m.id)??[];
  const album=attachments.filter(file=>file.customer_id===active.id&&file.mime.startsWith('image/'));
  const photoGroup=album.length>1?album:nearbyPhotos.get(m.id)??[];
@@ -157,8 +160,8 @@ export function InboxView(){
   {picked.length>0&&<Button className="quiet" onClick={()=>setSelectedFiles([])}>Clear selection</Button>}
   {(selectedPdfs.length>40||selectedPhotos.length>40)&&<small role="status">Choose up to 40 files per order.</small>}
  </div>}
- <form className="composer" onSubmit={async e=>{e.preventDefault();if(sending||!draft.trim())return;setSending(true);try{if(await run('reply',{id:active.id,text:draft},'Reply submitted to WhatsApp')&&useWorkspace.getState().customer===active.id)setDraft('')}finally{setSending(false)}}}><input aria-label="Reply" placeholder="Write a reply" value={draft} maxLength={4096} onChange={e=>setDraft(e.target.value)}/><Button type="submit" disabled={sending||!draft.trim()||!['API reachable','Connected'].includes(data.connection.status)}>Send</Button></form></>:<Empty title="Select a conversation"/>}</section>
- <aside className="padded stack customer-rail"><h2>Customer details</h2>{active?<><strong>{active.name}</strong><p>{active.phone||'Phone unavailable'}</p>{active.tag&&<Badge>{active.tag}</Badge>}<p>{money(data.jobs.filter(j=>j.customer_id===active.id&&j.status!=='Cancelled').reduce((n,j)=>n+j.total-j.paid,0))} outstanding</p><Button className="secondary" onClick={()=>state.set({view:'Customers'})}>View customer</Button><Button onClick={()=>state.set({view:'Print Studio',job:'',customer:active.id,photoStudio:true})}>Print customer photos</Button><h3>Chat documents</h3>{webConnected&&<Button className="secondary" disabled={!!syncingChat} onClick={()=>void loadChatDocuments(active.id)}>{syncingChat===active.id?"Loading documents…":"Load chat documents"}</Button>}{chatSync?.id===active.id&&<p className="subtle" role="status">{chatSync.text}</p>}{picked.length>0&&<div className="actions">
+ <form className="composer" onSubmit={async e=>{e.preventDefault();if(sending||!draft.trim())return;setSending(true);try{if(await run('reply',{id:active.id,text:draft},'Reply submitted to WhatsApp')&&useWorkspace.getState().customer===active.id)setDraft('')}finally{setSending(false)}}}><input aria-label="Reply" placeholder="Write a reply" value={draft} maxLength={4096} onChange={e=>setDraft(e.target.value)}/><Button type="submit" disabled={sending||!draft.trim()||!['API reachable','Connected'].includes(data.connection.status)}>Send</Button></form></>:<Empty title="Select a conversation"/>}</section></div>
+ {active&&detailsCustomer===active.id&&<DetailDrawer title="Customer details" onClose={()=>setDetailsCustomer('')}><div className="stack chat-customer-details"><strong>{active.name}</strong><p>{active.phone||'Phone unavailable'}</p>{active.tag&&<Badge>{active.tag}</Badge>}<p>{money(data.jobs.filter(j=>j.customer_id===active.id&&j.status!=='Cancelled').reduce((n,j)=>n+j.total-j.paid,0))} outstanding</p><Button className="secondary" onClick={()=>state.set({view:'Customers',customer:active.id})}>View customer</Button><Button onClick={()=>state.set({view:'Print Studio',job:'',customer:active.id,photoStudio:true})}>Print customer photos</Button><h3>Chat documents</h3>{webConnected&&<Button className="secondary" disabled={!!syncingChat} onClick={()=>void loadChatDocuments(active.id)}>{syncingChat===active.id?"Loading documents…":"Load chat documents"}</Button>}{chatSync?.id===active.id&&<p className="subtle" role="status">{chatSync.text}</p>}{picked.length>0&&<div className="actions">
  {selectedPdfs.length>0&&<><Button className="secondary" onClick={()=>openPrintFiles(selectedPdfs,true)}>Add to order</Button></>}
  {selectedPhotos.length>0&&<Button onClick={()=>openPrintFiles(selectedPhotos)}>Print photos ({selectedPhotos.length})</Button>}
  <Button className="quiet" onClick={()=>setSelectedFiles([])}>Clear selection</Button>
@@ -172,7 +175,7 @@ export function InboxView(){
    {file.status==='Ready'&&(file.mime==='application/pdf'||file.mime.startsWith('image/'))&&<Button className="quiet" onClick={()=>openPrintFiles([file])}>Print</Button>}
   </div>
  </div>)}</div>
- <h3>Previous orders</h3>{data.jobs.filter(j=>j.customer_id===active.id).map(j=><button className="file-link" key={j.id} onClick={()=>state.set({job:j.id,view:'Orders'})}>{j.id} · {orderStatusLabels[j.status]}</button>)}{data.jobs.some(j=>j.customer_id===active.id)&&<Button className="secondary" onClick={()=>state.set({view:'Print Studio',job:data.jobs.find(j=>j.customer_id===active.id)!.id})}>Quick print</Button>}<h3>Recent payments</h3>{data.payments.filter(payment=>data.jobs.some(job=>job.id===payment.job_id&&job.customer_id===active.id)).slice(0,4).map(payment=><small key={payment.id}>{money(payment.amount)} · {payment.method}</small>)}</>:<p className="subtle">Open a conversation to view its customer record.</p>}</aside></div>
+ <h3>Previous orders</h3>{data.jobs.filter(j=>j.customer_id===active.id).map(j=><button className="file-link" key={j.id} onClick={()=>state.set({job:j.id,view:'Orders'})}>{j.id} · {orderStatusLabels[j.status]}</button>)}{data.jobs.some(j=>j.customer_id===active.id)&&<Button className="secondary" onClick={()=>state.set({view:'Print Studio',job:data.jobs.find(j=>j.customer_id===active.id)!.id})}>Quick print</Button>}<h3>Recent payments</h3>{data.payments.filter(payment=>data.jobs.some(job=>job.id===payment.job_id&&job.customer_id===active.id)).slice(0,4).map(payment=><small key={payment.id}>{money(payment.amount)} · {payment.method}</small>)}</div></DetailDrawer>}
  {filePreview&&<DetailDrawer title={filePreview.name} presentation="wide" onClose={()=>setFilePreview(undefined)}>
   <div className="stack"><DocumentPreview id={filePreview.id}/>
    <div className="actions">

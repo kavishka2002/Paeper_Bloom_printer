@@ -101,11 +101,14 @@ class Client extends EventEmitter{
  }
  return [{
  id:{_serialized:this.message.from},isGroup:false,name:this.isSecondAccount?'Second account customer':'Web fixture customer',
+ lastMessage:existsSync(join(root,'skip-cached-history'))?this.message:undefined,
  getContact:()=>this.message.getContact(),
- fetchMessages:async()=>!this.isSecondAccount?[
+ fetchMessages:async()=>{
+  if(existsSync(join(root,'skip-cached-history')))throw new Error('Already cached chat should not fetch its history');
+  return !this.isSecondAccount?[
    {...incoming,id:{_serialized:'fixture-old-pdf'},rawData:{filename:'old-handout.pdf'},timestamp:incoming.timestamp-600},
    {...incoming,id:{_serialized:'fixture-old-out'},fromMe:true,type:'chat',hasMedia:false,body:'Earlier reply',timestamp:incoming.timestamp-500}
- ]:[secondIncoming]
+ ]:[secondIncoming]},
  }]}
  async getChatById(id){
  if(id!==this.message.from)throw new Error('Unexpected chat');
@@ -136,6 +139,8 @@ const load=Module._load;
 Module._load=function(request,...args){
  if(request==='puppeteer-core')return {PUPPETEER_REVISIONS:{chrome:'146.0.7680.31'},launch:async()=>{
   record('launch',clientCount+1);
+  const lock=join(root,'lock-profile-once');
+  if(existsSync(lock)){unlinkSync(lock);throw new Error('The browser is already running for this profile.')}
   if(process.env.BLOOMCONNECT_TEST_WEB_START_ERROR)throw new Error(process.env.BLOOMCONNECT_TEST_WEB_START_ERROR);
   if(process.env.BLOOMCONNECT_TEST_WEB_LAUNCH_DELAY)await new Promise(resolve=>setTimeout(resolve,Number(process.env.BLOOMCONNECT_TEST_WEB_LAUNCH_DELAY)));
   let connected=true;

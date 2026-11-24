@@ -29,7 +29,7 @@ function WhatsAppSetup(){
  const webActive=mode==='web';
  const loggingOut=status==='Logging Out';
  const connected=status==='Connected';
- const starting=['Starting Engine','Browser Started','WhatsApp Web Loaded','Checking Authentication','Waiting for Fresh QR','Authenticating'].includes(status);
+ const starting=['Starting Engine','Browser Started','WhatsApp Web Loaded','Checking Authentication','Waiting for Fresh QR','Authenticating','Reconnecting'].includes(status);
  const actionLabel=connected?'Device linked':loggingOut?'Logging out…':status==='Disconnected'?'Connect New WhatsApp':status==='Connection Failed'?'Retry Connection':status==='QR Ready'||status==='QR Expired'?'Refresh QR / Restart Engine':webActive?'Restart WhatsApp Engine':'Connect New WhatsApp';
  return <div className="stack">
    <div className="connection"><Cloud/><div><strong>WhatsApp Web · {webActive?status:'Unlinked'}</strong>{phone&&webActive&&<p>{phone}</p>}</div></div>

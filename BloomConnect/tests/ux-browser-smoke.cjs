@@ -205,8 +205,14 @@ async function checkWorkflow(){
   await page.click('dialog[open] button[aria-label="Close details"]');
   await page.evaluate(()=>window.navigate('WhatsApp'));
   await page.waitForSelector('.chat-pdf-pick input');
+  assert.equal(await page.$('.inbox-layout .customer-rail'),null);
+  assert.ok(await page.$eval('.inbox-layout',layout=>layout.querySelector('.chat').clientWidth/layout.clientWidth>=0.7));
   await page.click('.chat-pdf-pick input');
-  assert.equal(await page.$eval('.chat-document input[type=checkbox]',node=>node.checked),true);
+  await click('Customer details','.chat-title');
+  const customerDetails='dialog[open][aria-label="Customer details"]';
+  await page.waitForSelector(customerDetails);
+  assert.equal(await page.$eval(customerDetails+' .chat-document input[type=checkbox]',node=>node.checked),true);
+  await page.click(customerDetails+' button[aria-label="Close details"]');
   await click('Review selected PDFs (1)');
   await page.waitForSelector('dialog[open][aria-label="Customer PDF batch"]');
   const batch='dialog[aria-label="Customer PDF batch"]';

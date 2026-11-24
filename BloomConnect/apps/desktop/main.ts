@@ -873,4 +873,24 @@ else void app.whenReady().then(async()=>{
 });
 app.on('second-instance',()=>{if(startupSplash&&!startupSplash.isDestroyed()&&startupSplash.isVisible()){startupSplash.focus();return}if(main&&!main.isDestroyed()){if(main.isMinimized())main.restore();main.focus()}});
 app.on('window-all-closed',()=>app.quit());
-app.on('before-quit',()=>{stopping=true;clearInterval(licenseMonitor);licensing?.flush();if(child?.connected)child.disconnect()});
+let waitingForEngineExit=false;
+app.on('before-quit',event=>{
+  if(waitingForEngineExit){event.preventDefault();return}
+  if(stopping)return;
+  stopping=true;
+  clearInterval(licenseMonitor);
+  licensing?.flush();
+  const worker=child;
+  if(!worker||worker.exitCode!==null||worker.signalCode!==null)return;
+  event.preventDefault();
+  waitingForEngineExit=true;
+  const finish=()=>{
+    clearTimeout(deadline);
+    worker.off('exit',finish);
+    waitingForEngineExit=false;
+    app.quit();
+  };
+  const deadline=setTimeout(finish,46_000);
+  worker.once('exit',finish);
+  if(worker.connected)worker.disconnect();
+});

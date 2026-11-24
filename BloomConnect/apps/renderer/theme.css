@@ -176,8 +176,9 @@ tbody tr:hover {background:var(--soft)}
 .tabs button {padding:5px 8px;border-radius:7px;border:1px solid var(--line);font-size:11px;color:var(--muted);background:var(--surface)}
 .tabs button[aria-pressed="true"] {background:var(--soft);color:var(--accent);border-color:var(--focus);font-weight:700}
 .filter-bar select,.filter-bar input,.field-search {width:auto;min-width:0;max-width:100%}
-.inbox-layout {padding:0;min-height:415px;height:max(415px,calc(100vh - 194px));grid-template-columns:minmax(178px,.8fr) minmax(235px,1.5fr) minmax(155px,.71fr)}
-.conversation-list,.customer-rail {max-height:none;min-height:0;scrollbar-width:thin}
+.inbox-layout {min-height:415px;height:max(415px,calc(100vh - 194px))}
+.whatsapp-inbox[data-connected="true"] .inbox-layout {height:max(415px,calc(100vh - 130px))}
+.conversation-list {max-height:none;min-height:0;scrollbar-width:thin}
 .conversation-list>.padded {position:sticky;top:0;z-index:1;background:var(--surface);padding:11px;border-bottom:1px solid var(--line);gap:7px}
 .conversation {padding:8px 10px;gap:8px;border-top:0;border-bottom:1px solid var(--line)}
 .conversation.selected {box-shadow:inset 3px 0 var(--primary)}
@@ -191,8 +192,7 @@ tbody tr:hover {background:var(--soft)}
 .bubble.outgoing {background:var(--sent);border-radius:13px 5px 13px 13px}
 .bubble .file-link {padding:6px 8px;margin-top:4px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
 .bubble .file-link svg {flex:none}
-.customer-rail {padding:11px;gap:7px}
-.customer-rail h3 {padding-top:7px;border-top:1px solid var(--line)}
+.chat-customer-details h3 {padding-top:7px;border-top:1px solid var(--line)}
 .connection {padding:8px 10px;border:1px solid var(--line);border-radius:9px}
 .connection[data-connected="true"] {background:var(--green-tint);color:var(--green)}
 .connection[data-connected="false"] {background:var(--warm-tint);color:var(--warm-text)}
@@ -273,7 +273,7 @@ tbody tr:hover {background:var(--soft)}
 .loading-stack .skeleton:last-child {width:78%}
 .toast {animation:slide-in var(--speed) ease-out}
 @media(max-width:1260px){.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.breadcrumbs>span,.breadcrumbs>svg{display:none}}
-@media(max-width:1080px){.topbar{padding-inline:12px;gap:6px}.top-actions .printer-status span{display:none}.breadcrumbs{display:none}main{padding-inline:13px}.inbox-layout{grid-template-columns:minmax(148px,.75fr) minmax(203px,1.2fr) minmax(144px,.65fr)}.split{grid-template-columns:minmax(0,1.2fr) minmax(230px,1fr)}}
+@media(max-width:1080px){.topbar{padding-inline:12px;gap:6px}.top-actions .printer-status span{display:none}.breadcrumbs{display:none}main{padding-inline:13px}.split{grid-template-columns:minmax(0,1.2fr) minmax(230px,1fr)}}
 @media(max-height:780px){.sidebar nav .nav-item{min-height:26px;padding-block:3px}.sidebar nav .nav-label{min-height:18px}.sidebar{gap:7px;padding-block:8px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 .summary-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px}
@@ -358,7 +358,7 @@ tbody tr:hover {background:var(--soft)}
 .queue-order-table :is(th,td):last-child {width:36%;min-width:230px}
 .print-job-card .panel-head {margin-bottom:0}
 .report-metrics {grid-template-columns:repeat(auto-fit,minmax(135px,1fr))}
-.chat-title>.badge {margin-left:auto}
+.chat-details-toggle {margin-left:auto;flex:none}
 .table-wrap .text-button>.avatar {display:inline-grid;vertical-align:middle;margin-right:6px}
 @media(max-width:1050px){.studio-workspace{grid-template-columns:minmax(105px,.65fr) minmax(175px,1fr) minmax(215px,1fr);gap:9px}.studio-workspace>.panel{padding:10px}}
 .document-grid {grid-template-columns:repeat(auto-fill,minmax(151px,1fr))}

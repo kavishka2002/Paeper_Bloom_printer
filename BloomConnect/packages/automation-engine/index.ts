@@ -84,11 +84,17 @@ let webOperation=0;
 let cloudTransition=false;
 let webRetry:ReturnType<typeof setTimeout>|undefined;
 let webRetryAttempt=0;
-const maxWebRetries=3;
 let shuttingDown=false;
+if(store.setting('whatsappProvider')==='web'&&!row('SELECT key FROM settings WHERE key=?','lastWebAccount')){
+  const accounts=rows<{id:string}>("SELECT id FROM whatsapp_accounts WHERE id LIKE 'web:%' LIMIT 2");
+  if(accounts.length===1)store.save('lastWebAccount',accounts[0].id);
+}
 function retryWeb(){
-  if(shuttingDown||webRetry||webRetryAttempt>=maxWebRetries||store.setting('whatsappProvider')!=='web')return;
-  const delay=Math.min(5000*2**webRetryAttempt++,30000);
+  if(shuttingDown||webRetry||store.setting('whatsappProvider')!=='web')return;
+  const delay=Math.min(5000*2**webRetryAttempt,30000);
+  webRetryAttempt=Math.min(webRetryAttempt+1,3);
+  connection={...connection,status:'Reconnecting',detail:'WhatsApp will reconnect automatically. Saved chats are still available.'};
+  changed();
   webRetry=setTimeout(()=>{
     webRetry=undefined;
     if(!shuttingDown&&store.setting('whatsappProvider')==='web')void connectWeb(null,true).catch(()=>{});
@@ -112,8 +118,12 @@ function allFilesConfirmed(id:string){
  }
  const files=printFiles(id);return files.length>0&&files.every(file=>covered.has(file));
 }
+function visibleMessageAccount(){
+ const savedWebAccount=store.setting('whatsappProvider')==='web'?store.setting<string>('lastWebAccount'):null;
+ return web?.account||adapter?.config.phoneId||savedWebAccount;
+}
 function snapshot():Snapshot{
- const activeAccount=web?.account||adapter?.config.phoneId;
+ const activeAccount=visibleMessageAccount();
  return {
   settings:store.setting('shop'),customers:rows('SELECT * FROM customers ORDER BY last DESC'),
   messages:activeAccount
@@ -369,7 +379,7 @@ async function syncChatDocuments({id}:Input<'webChatSync'>){
   })();
   return {messages:messages.length,documents:messages.filter(message=>message.file).length,partial};
 }
-async function syncWebChats(onConnect=false){
+async function syncWebChats(onConnect=false,skipSaved=false){
   const current=web;
   if(!current||connection.status!=='Connected')throw new Error('Link WhatsApp Web before syncing chats.');
   if(syncingWeb===current)return;
@@ -379,7 +389,7 @@ async function syncWebChats(onConnect=false){
       if(web!==current)return;
       store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],[],true)});
       changed();
-  });
+  },skipSaved?id=>!!row('SELECT id FROM messages WHERE account_id=? AND id=?',current.account,id):undefined);
   try{
     let result;
     if(onConnect){
@@ -445,12 +455,14 @@ async function connectWeb(_input:null=null,automatic=false){
         }
       },
       ready(account,phone){
-        if(web!==next)return;
+        if(web!==next||connection.status==='Connected')return;
+        const restoring=store.setting('lastWebAccount')===account;
         run('INSERT INTO whatsapp_accounts VALUES (?,?) ON CONFLICT(id) DO UPDATE SET phone=excluded.phone',account,phone);
+        store.save('lastWebAccount',account);
         webRetryAttempt=0;
         if(webRetry){clearTimeout(webRetry);webRetry=undefined}
         connection={status:'Connected',mode:'web',phone,webhook:false};changed();
-        void syncWebChats(true);
+        void syncWebChats(true,restoring);
         for(const a of rows<{id:string}>("SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.status='Pending' AND m.account_id=? LIMIT 20",account))void receiveMedia(a.id).catch(()=>{});
       },
       offline(detail,retry=false){
@@ -486,6 +498,7 @@ async function connectWeb(_input:null=null,automatic=false){
         const stopDetail=stopError instanceof Error?stopError.message.replace(/[\r\n\t]+/g,' ').slice(0,240):'Unknown shutdown error.';
         connection={...connection,detail:connection.detail+' Browser shutdown also failed: '+stopDetail};changed();
       }
+      if(web===next&&store.setting('lastWebAccount')&&/already running for|ERR_(?:INTERNET_DISCONNECTED|NETWORK_CHANGED|NAME_NOT_RESOLVED|CONNECTION_[A-Z_]+)/i.test(reason))retryWeb();
     }
   }catch(error){
     if(operation===webOperation){
@@ -631,6 +644,7 @@ const handlers:HandlerMap={
     connection={status:'Logging Out',...(previous||wasWeb?{mode:'web' as const}:{}),phone:'',webhook:false};changed();
     try{
       store.save('whatsappProvider',null);
+      store.save('lastWebAccount',null);
       const result=previous?await previous.stop(true):undefined;
       if(operation!==webOperation)return;
       connection={status:'Disconnected',phone:'',webhook:false,...(result?.warning?{mode:'web' as const,detail:result.warning}:{})};
@@ -644,7 +658,7 @@ const handlers:HandlerMap={
   customer(input){const phone=input.phone.replace(/^\+/,'');if(input.id){const c=row<Customer>('SELECT * FROM customers WHERE id=?',input.id);if(!c)throw new Error('Customer not found.');if(c.phone!==phone&&row('SELECT id FROM messages WHERE customer_id=?',c.id))throw new Error('The WhatsApp number is linked to this message history.');run('UPDATE customers SET name=?,phone=?,notes=?,tag=? WHERE id=?',input.name,phone,input.notes,input.tag,c.id)}
     else run('INSERT INTO customers VALUES (?,?,?,?,?,?,?)',randomUUID(),input.name,phone,input.notes,input.tag,now(),now());store.audit('Customer saved',input.name)},
   read({id}){
-    const account=web?.account||adapter?.config.phoneId;
+    const account=visibleMessageAccount();
     if(account)run('UPDATE messages SET unread=0 WHERE customer_id=? AND account_id=?',id,account);
     else run('UPDATE messages SET unread=0 WHERE customer_id=?',id);
   },

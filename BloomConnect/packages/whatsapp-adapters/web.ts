@@ -295,7 +295,7 @@ export class WebAdapter {
     });
     client.on('ready',()=>{
       const chat=client.info?.wid?._serialized;
-      if(!chat||this.stopped)return;
+      if(!chat||this.stopped||this.ready)return;
       clearTimeout(this.startupTimer);
       this.stopQrTimers();
       this.stopAuthStateWatch();
@@ -562,7 +562,7 @@ export class WebAdapter {
     }
     throw new Error('WhatsApp Web could not find this chat. Open it on your phone and retry.');
   }
-  async syncHistory(consume:(messages:WebMessage[])=>void){
+  async syncHistory(consume:(messages:WebMessage[])=>void,isSaved?:(id:string)=>boolean){
     if(!this.ready||this.stopped)throw new Error('Link WhatsApp Web before syncing chats.');
     const chats=(await historyWithin(this.client!.getChats())).filter(chat=>!chat.isGroup&&this.isDirect(chat.id._serialized))
       .sort((a,b)=>(b.timestamp??0)-(a.timestamp??0)).slice(0,30);
@@ -570,6 +570,11 @@ export class WebAdapter {
     let imported=0;
     const sync=async(chat:Chat)=>{
       if(!this.ready||this.stopped)throw new Error('WhatsApp Web disconnected during chat sync.');
+      const latest=chat.lastMessage?.id?._serialized;
+      if(latest&&isSaved?.(latest)){
+        imported++;
+        return;
+      }
       const contact=await historyWithin(chat.getContact(),3_000).catch(()=>undefined);
       const identity=await this.identity(chat.id._serialized,contact,chat.name);
       const {messages:history,partial}=await this.fetchHistory(chat,20);

@@ -29,13 +29,13 @@ function App(){
  const [collapsed,setCollapsed]=useState(()=>localStorage.getItem('sidebar')==='collapsed');
  const snapshot=useQuery({queryKey:['data'],queryFn:()=>window.bloom.call('snapshot',null),refetchInterval:30000});
  const openedWhatsApp=useRef(false);
- const connectedToWeb=snapshot.data?.connection.mode==='web'&&snapshot.data.connection.status==='Connected';
+ const whatsAppAvailable=snapshot.data?.connection.mode==='web'&&(snapshot.data.connection.status==='Connected'||snapshot.data.messages.length>0);
  useEffect(()=>{
-  if(!connectedToWeb||openedWhatsApp.current)return;
+  if(!whatsAppAvailable||openedWhatsApp.current)return;
   openedWhatsApp.current=true;
   const workspace=useWorkspace.getState();
   if(workspace.view==='Dashboard'||workspace.view==='Automation Engine')workspace.set({view:'WhatsApp'});
- },[connectedToWeb]);
+ },[whatsAppAvailable]);
  const printer=useQuery({queryKey:['printers'],queryFn:()=>window.bloom.call('printers',null),refetchInterval:25000});
  const startupSettled=!!snapshot.data||snapshot.isError;
  useEffect(()=>{if(startupSettled)void window.startupReady?.().catch(()=>{})},[startupSettled]);
