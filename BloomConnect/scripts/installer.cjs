@@ -1,6 +1,6 @@
 const {build,Platform}=require('electron-builder');
 const feed=process.env.BLOOMCONNECT_UPDATE_URL?.trim();
-const config={publish:null};
+const config={};
 if(feed){
  const url=new URL(feed);
  if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw new Error('The update channel must be an HTTPS directory URL.');

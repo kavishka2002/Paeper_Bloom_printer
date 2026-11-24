@@ -78,6 +78,7 @@ async function checkWorkflow(){
     }
     if(op==='webChatSync')return {messages:0,documents:0,partial:false};
     if(op==='retryMedia'&&input.id==='history-pdf'){
+     if(window.holdHistoryDownload)await window.holdHistoryDownload;
      Object.assign(data.attachments.find(item=>item.id===input.id),{mime:'application/pdf',status:'Ready'});
      return;
     }
@@ -139,6 +140,12 @@ async function checkWorkflow(){
      document.querySelector('.pdf-workspace').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:event}));
     };
     const refresh=async()=>setSnapshot({...data});
+    window.openHistoryDownload=async()=>{
+     Object.assign(data.attachments.find(item=>item.id==='history-pdf'),{mime:'',status:'Available to download'});
+     window.holdHistoryDownload=new Promise(resolve=>{window.finishHistoryDownload=resolve});
+     useWorkspace.getState().set({view:'WhatsApp',customer:'history-chat'});
+     await refresh();
+    };
     return <ctx.Provider value={{data:snapshot,printers:[{name:'Microsoft Print to PDF',displayName:'Microsoft Print to PDF',isDefault:true},{name:'OneNote (Desktop)',displayName:'OneNote (Desktop)',isDefault:false},...(hasPhysical?[{name:printer,displayName:'Toshiba 257',isDefault:false}]:[])],
      run:async(op,input)=>{await window.bloom.call(op,input);await refresh();return true},refresh,error:e=>{window.friendly=e.message}}}>
      {view==='PDF Studio'?<PdfWorkspace/>:view==='Print Studio'?<Studio/>:view==='Orders'?<Orders/>:view==='WhatsApp'?<InboxView/>:<Queue/>}
@@ -460,6 +467,13 @@ async function checkWorkflow(){
   await page.waitForFunction(count=>window.attempts.length===count+1,{},beforeBulk);
   assert.deepEqual((await page.evaluate(()=>window.attempts.at(-1).fileSelection)).sort(),['bulk-a','bulk-b']);
   await page.waitForFunction(selector=>document.querySelector(selector)?.innerText.includes('2 PDFs sent to the print queue'),{},batch);
+  await page.click(batch+' button[aria-label="Close details"]');
+  await page.evaluate(()=>window.openHistoryDownload());
+  await click('history.pdf · Available to download','.chat');
+  const attachmentPreview='dialog[open][aria-label="history.pdf"]';
+  await page.waitForSelector(attachmentPreview+' [role="status"]');
+  await page.evaluate(()=>window.finishHistoryDownload());
+  await page.waitForSelector(attachmentPreview+' canvas:not([hidden])');
   const duplexFixture=new URL(page.url());
   duplexFixture.searchParams.set('duplex-test','1');
   await page.goto(duplexFixture.href);

@@ -110,12 +110,17 @@ test('engine validates inputs, imports and deduplicates, persists billing and cr
   await engine.call('customer',{name:'Local test',phone:'',notes:'',tag:''});
   const customer=(await engine.call('snapshot',null)).customers[0].id;
   const path=join(root,'test.png');
-  const png=await require('sharp')({create:{width:16,height:16,channels:3,background:'#10b981'}}).png().toBuffer();
+  const png=await require('sharp')({create:{width:320,height:160,channels:3,background:'#10b981'}}).png().toBuffer();
   await writeFile(path,png);
   assert.equal(await engine.call('importLocal',{paths:[path],customer}),1);
   assert.equal(await engine.call('importLocal',{paths:[path],customer}),0);
   const file=(await engine.call('snapshot',null)).attachments[0].id;
-  assert.equal((await engine.call('getPreview',{id:file})).mime,'image/png');
+  const thumbnail=await engine.call('getPreview',{id:file,imageMaxSide:200});
+  const resized=await require('sharp')(Buffer.from(thumbnail.bytes)).metadata();
+  assert.deepEqual([thumbnail.mime,resized.width,resized.height],['image/png',200,100]);
+  const originalPreview=await engine.call('getPreview',{id:file});
+  assert.equal(originalPreview.mime,'image/png');
+  assert.deepEqual(Buffer.from(originalPreview.bytes),png);
   const order={files:[file],copies:2,paper:'A4',colour:false,price:1200,discount:100,charge:200};
   await assert.rejects(engine.call('order',{...order,customer:null}),/same customer/);
   const id=await engine.call('order',{...order,customer});
@@ -318,7 +323,11 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   const historical=state.attachments.find(file=>file.message_id==='fixture-old-pdf');
   assert.equal(historical.name,'old-handout.pdf');
   assert.equal(historical.status,'Available to download');
-  await engine.call('retryMedia',{id:historical.id});
+  await Promise.all(Array.from({length:2},async()=>{
+    await engine.call('retryMedia',{id:historical.id});
+    const snapshot=await engine.call('snapshot',null);
+    assert.equal(snapshot.attachments.find(file=>file.id===historical.id).status,'Ready');
+  }));
   const downloaded=await engine.call('snapshot',null);
   assert.equal(downloaded.attachments.find(file=>file.id===historical.id).status,'Ready');
   assert.equal(downloaded.jobs.length,1);
@@ -564,7 +573,7 @@ test('WhatsApp initialization reports the exact authentication-state wait failur
 
 test('WhatsApp Web reconnects automatically and restores the provider after restart',async()=>{
  const root=await mkdtemp(join(tmpdir(),'bloom-web-reconnect-'));
- let engine=start(root,'web');
+ let engine=start(root,'web',{BLOOMCONNECT_TEST_RECENT_INBOUND:'1'});
  const waitFor=async(status,requireHistory=false)=>{
   for(let attempt=0;attempt<240;attempt++){
    const state=await engine.call('snapshot',null);
@@ -579,11 +588,22 @@ test('WhatsApp Web reconnects automatically and restores the provider after rest
   await engine.call('webConnect',null);
   const initial=await waitFor('Connected',true);
   assert.ok(initial.messages.some(message=>message.id==='fixture-old-pdf'));
+  const file=initial.attachments.find(file=>file.status==='Ready');
+  const order=await engine.call('order',{customer:file.customer_id,files:[file.id],copies:1,paper:'A4',colour:false,price:1000,discount:0,charge:0});
   await writeFile(join(root,'disconnect-web'),'Disconnect');
   const reconnecting=await waitFor('Reconnecting');
   assert.ok(reconnecting.messages.some(message=>message.id==='fixture-old-pdf'));
+  await engine.call('stage',{id:order,status:'Ready to Print'});
+  const notice=async()=>(await engine.call('notificationLog',null)).find(item=>item.event_key==='ready-to-print:'+order);
+  const waiting=await notice();
+  assert.equal(waiting.status,'Pending');
+  assert.equal(waiting.attempts,0);
   const restored=await waitFor('Connected');
   assert.equal(restored.connection.phone,initial.connection.phone);
+  for(let attempt=0;attempt<50&&(await notice())?.status==='Pending';attempt++)await new Promise(resolve=>setTimeout(resolve,50));
+  const delivered=await notice();
+  assert.equal(delivered.status,'Accepted');
+  assert.equal(delivered.attempts,1);
   await engine.stop();
   await writeFile(join(root,'lock-profile-once'),'Previous browser still closing');
   await writeFile(join(root,'skip-cached-history'),'Keep the existing messages');

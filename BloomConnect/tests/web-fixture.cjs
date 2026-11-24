@@ -15,7 +15,7 @@ const id='false_94710000000@c.us_fixture';
 let clientCount=0;
 const record=(event,index)=>appendFileSync(join(root,'web-lifecycle.log'),event+':'+index+'\n');
 const incoming={
- fromMe:false,from:contact,id:{_serialized:id},timestamp:Math.floor(Date.now()/1000)-36*3600,type:'document',body:'Please print',hasMedia:true,
+ fromMe:false,from:contact,id:{_serialized:id},timestamp:Math.floor(Date.now()/1000)-(process.env.BLOOMCONNECT_TEST_RECENT_INBOUND==='1'?60:36*3600),type:'document',body:'Please print',hasMedia:true,
  async getContact(){return {id:{_serialized:contact},name:'Web fixture customer'}},
  async downloadMediaStream(){return {stream:Readable.from([Buffer.from('%PDF-1.7\n% test attachment')])}}
 };
@@ -23,7 +23,7 @@ const secondIncoming={...incoming,from:secondContact,id:{_serialized:'second-acc
  async getContact(){return {id:{_serialized:secondContact},name:'Second account customer'}}};
 class Client extends EventEmitter{
  options={};
- constructor(...args){super(...args);this.index=++clientCount;this.isSecondAccount=existsSync(join(root,'switch-account'));this.account=this.isSecondAccount?'94710000002@c.us':'94710000001@c.us';this.message=this.isSecondAccount?secondIncoming:incoming;this.readyOnce=false}
+ constructor(options){super();this.options=options;this.index=++clientCount;this.isSecondAccount=existsSync(join(root,'switch-account'));this.account=this.isSecondAccount?'94710000002@c.us':'94710000001@c.us';this.message=this.isSecondAccount?secondIncoming:incoming;this.readyOnce=false}
  markReady(){
  if(this.readyOnce)return;
  this.readyOnce=true;
@@ -52,16 +52,21 @@ class Client extends EventEmitter{
  const nativeLogin=process.env.BLOOMCONNECT_TEST_WEB_NATIVE_LOGIN==='1';
  const linked=()=>existsSync(join(root,'release-qr'));
  this.pupPage=Object.assign(new EventEmitter(),{
+ goto:async(url,options)=>{
+  if(url!=='https://web.whatsapp.com/'||options.waitUntil!=='domcontentloaded'||options.timeout<=0)throw new Error('Expected bounded WhatsApp startup navigation.');
+ },
  url:()=>nativeLogin&&!linked()?'https://web.whatsapp.com/login/':'https://web.whatsapp.com/',
  evaluate:async predicate=>{
   if(nativeLogin&&predicate.toString().includes('querySelector'))return linked()?null:'data:image/png;base64,fixture-native-qr';
   return new Function('return ('+predicate.toString()+')')()();
  },waitForFunction:async(predicate)=>{
   if(process.env.BLOOMCONNECT_TEST_WEB_AUTH_STATE_TIMEOUT==='1'&&predicate.toString().includes('WAWebSocketModel'))throw new Error('Waiting failed:60000ms exceeded');
-  return {jsonValue:async()=>{
+  return {dispose:async()=>{},jsonValue:async()=>{
   const value=typeof predicate==='function'?predicate():true;
   return value&&typeof value==='object'?value:{need:value==='UNPAIRED_IDLE',state:value};
  }}}});
+ await this.options.authStrategy.afterBrowserInitialized();
+ await this.pupPage.goto('https://web.whatsapp.com/',{waitUntil:'load',timeout:0});
  await this.inject();
  record('initialize',this.index);
  this.qrRefreshTimer=setInterval(()=>{
@@ -148,6 +153,7 @@ Module._load=function(request,...args){
  }};
  if(request==='whatsapp-web.js')return {Client,LocalAuth:class{
   constructor(options){this.dataPath=options.dataPath}
+  async afterBrowserInitialized(){}
   async logout(){record('auth-clear',clientCount);await rm(join(this.dataPath,'session'),{recursive:true,force:true})}
  }};
  return load.call(this,request,...args)

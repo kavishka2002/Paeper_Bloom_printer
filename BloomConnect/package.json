@@ -1,7 +1,7 @@
 {
   "name": "bloomconnect",
   "productName": "BloomConnect",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "WhatsApp Automation & Print Management",
   "author": "BloomConnect",
   "main": "dist/main.cjs",
@@ -49,6 +49,11 @@
   "build": {
     "appId": "lk.bloomconnect.desktop",
     "productName": "BloomConnect",
+    "artifactName": "BloomConnect-Setup-${version}.${ext}",
+    "publish": {
+      "provider": "generic",
+      "url": "https://github.com/kavishka2002/Paeper_Bloom_printer/releases/latest/download/"
+    },
     "directories": {
       "output": "release"
     },

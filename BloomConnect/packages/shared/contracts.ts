@@ -36,7 +36,7 @@ export const schemas = {
   setup:z.object({shop:label,language:z.enum(['en','si']),printer:z.string().max(512),mono:cents,colour:cents,photo:cents,duplexMono:cents.optional(),duplexColour:cents.optional(),paperRates:paperDocumentRatesSchema.optional()}),
   connect:z.object({phoneId:z.string().regex(/^\d{5,30}$/),version:z.string().regex(/^v\d{1,2}\.0$/),token:z.string().min(20).max(4096),appSecret:z.string().min(16).max(256),verifyToken:z.string().min(16).max(256)}),
   customer:z.object({id:id.optional(),name:label,phone:z.string().regex(/^\+?[1-9]\d{6,14}$/).or(z.literal('')),notes:z.string().max(4000),tag:z.string().max(120)}),
-  import:z.object({customer:id.nullable()}), preview:z.object({id,page:z.number().int().min(1).max(10000).optional()}),
+  import:z.object({customer:id.nullable()}), preview:z.object({id,page:z.number().int().min(1).max(10000).optional(),compatibleImage:z.boolean().optional(),imageMaxSide:z.number().int().min(64).max(1800).optional()}),
   retryMedia:z.object({id}), read:z.object({id}),
   order:z.object({customer:id.nullable(),files:z.array(id).min(1).max(40),copies:z.number().int().min(1).max(100),paper:z.enum(paperNames),colour:z.boolean(),price:cents,discount:cents,charge:cents,calculations:z.array(z.object({id,settings:calculationSchema})).min(1).max(40).optional(),printSettings:printSettingsSchema.optional()}),
   updatePhotoOrder:z.object({id,files:z.array(id).min(1).max(40),printSettings:printSettingsSchema,total:cents,reason:z.string().trim().min(3).max(500)}),

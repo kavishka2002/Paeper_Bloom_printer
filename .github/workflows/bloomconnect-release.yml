@@ -40,6 +40,18 @@ jobs:
       - run: npm test
       - run: npx --no-install electron-builder --win nsis --x64 --publish never
 
+      - name: Verify update assets
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $installer = "BloomConnect-Setup-$version.exe"
+          foreach ($path in @("release/$installer", "release/$installer.blockmap", "release/latest.yml", "release/win-unpacked/resources/app-update.yml")) {
+            if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing update file $path." }
+          }
+          if (!(Select-String -LiteralPath 'release/latest.yml' -SimpleMatch $installer -Quiet)) {
+            throw 'Update metadata must reference the uploaded installer filename.'
+          }
+
       - name: Verify packaged app starts
         shell: pwsh
         run: |
@@ -56,11 +68,14 @@ jobs:
           $result = Get-Content -Raw (Join-Path $env:BLOOMCONNECT_SMOKE_DIR 'smoke.json') | ConvertFrom-Json
           if (!$result.setup -or !$result.pdfPreview) { throw "Packaged setup or PDF preview failed." }
 
-      - name: Upload Windows installer
+      - name: Upload Windows installer and update feed
         uses: actions/upload-artifact@v4
         with:
           name: BloomConnect-Windows-x64
-          path: BloomConnect/release/*.exe
+          path: |
+            BloomConnect/release/BloomConnect-Setup-*.exe
+            BloomConnect/release/BloomConnect-Setup-*.exe.blockmap
+            BloomConnect/release/latest.yml
           if-no-files-found: error
 
   release:
@@ -79,5 +94,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" installer/*.exe \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          gh release create "$GITHUB_REF_NAME" installer/*.exe installer/*.exe.blockmap installer/latest.yml \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --latest

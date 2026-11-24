@@ -175,10 +175,13 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
   if(!list.some(p=>p.name===input.printer))throw new Error('Select an available Windows printer.');
   const verified=normalizedSettings(input);
   if(isPdfPrinter(input.printer))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
-  const capabilities=await queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified).catch(error=>{
-    if(!canPrintWithoutCapabilities({...verified,duplex:submissionDuplex(verified.duplex,isVirtualPrinter(input.printer))}))throw error;
-    return undefined;
-  });
+  const [capabilities,files]=await Promise.all([
+    queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified).catch(error=>{
+      if(!canPrintWithoutCapabilities({...verified,duplex:submissionDuplex(verified.duplex,isVirtualPrinter(input.printer))}))throw error;
+      return undefined;
+    }),
+    test?[]:selectedPrintFiles(input)
+  ]);
   if(isPdfPrinter(input.printer,capabilities?.driver))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
   const fileOutput=isFileOutputPrinter(capabilities?.port??'');
   const virtual=isVirtualPrinter(input.printer)||isVirtualPrinter(capabilities?.driver??'')||fileOutput;
@@ -191,7 +194,6 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
     for(const edge of ['left','right','top','bottom'] as const)if(Math.max(margins[edge],verified.printable?.[edge]??0)+.1<capabilities.printable[edge])throw new Error('Photo layout exceeds this printer printable area. Refresh the printer selection and review the new layout before printing.');
   }
   const native=verified.tray!==undefined||!!verified.driverDpi;
-  const files=test?[]:await selectedPrintFiles(input);
   if(!test&&!files.length)throw new Error('This order has no files.');
   if(input.booklet&&(input.nup!==2||input.duplex==='simplex'||!input.landscape))throw new Error('Booklets require landscape paper, two pages per side and duplex.');
   const [sheetWidth,sheetHeight]=orientedPaper(verified);
@@ -714,17 +716,18 @@ else void app.whenReady().then(async()=>{
         const sharp=(await import('sharp')).default;
         const paths=[];
         for(const [i,background] of ['#c42c46','#176ca4'].entries()){
-          const path=join(root,'photo-fixture-'+i+'.png');
-          await writeFile(path,await sharp({create:{width:600,height:400,channels:3,background}}).png().toBuffer());paths.push(path);
+          const path=join(root,'photo-fixture-'+i+(i?'.jpg':'.png'));
+          const image=sharp({create:{width:600,height:400,channels:3,background}});
+          await writeFile(path,await (i?image.jpeg():image.png()).toBuffer());paths.push(path);
         }
         await engine('customer',{name:'Photo test customer',phone:'',notes:'',tag:''});
         const customers=await engine<{customers:{id:string;name:string}[]}>('snapshot',null);
         const customer=customers.customers.find(item=>item.name==='Photo test customer')!.id;
         await engine('importLocal',{paths,customer});
         const snapshot=await engine<{attachments:{id:string;customer_id:string|null;mime:string}[]}>('snapshot',null);
-        const photos=snapshot.attachments.filter(a=>a.mime==='image/png'&&a.customer_id===customer);
-        const settings=normalizedSettings({printer:'',paper:'A4',copies:1,colour:true,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single',marginMm:5,gapMm:2,autoRotate:true,photoBatch:true,photoGrid:{rows:2,columns:2},photoItems:Object.fromEntries(photos.map((p,i)=>[p.id,{widthMm:i?50.8:101.6,heightMm:i?50.8:152.4,quantity:i?6:2,rotation:0,fit:'contain',brightness:110,contrast:95,saturation:85,sharpness:20,flipX:true,crop:{x:.05,y:.1,width:.9,height:.8}}]))});
-        const id=await engine<string>('order',{customer,files:photos.map(p=>p.id),copies:1,paper:'A4',colour:true,price:20000,discount:0,charge:0,printSettings:settings});
+        const photos=snapshot.attachments.filter(a=>a.mime.startsWith('image/')&&a.customer_id===customer);
+        const settings=normalizedSettings({printer:'',paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single',marginMm:5,gapMm:2,autoRotate:true,photoBatch:true,photoGrid:{rows:2,columns:2},photoItems:Object.fromEntries(photos.map((p,i)=>[p.id,{widthMm:i?50.8:101.6,heightMm:i?50.8:152.4,quantity:i?6:2,rotation:0,fit:'contain',brightness:110,contrast:95,saturation:85,sharpness:20,flipX:true,crop:{x:.05,y:.1,width:.9,height:.8}}]))});
+        const id=await engine<string>('order',{customer,files:photos.map(p=>p.id),copies:1,paper:'A4',colour:false,price:20000,discount:0,charge:0,printSettings:settings});
         await main.loadURL(index);
         const preview=await main.webContents.executeJavaScript(`(async()=>{
           const wait=async(test)=>{for(let i=0;i<250;i++){const result=test();if(result)return result;await new Promise(r=>setTimeout(r,80))}throw new Error('Photo smoke timeout: '+document.body.innerText.slice(-1500))};
@@ -751,10 +754,10 @@ else void app.whenReady().then(async()=>{
           (await wait(()=>button('Next',settings))).click();
           await wait(()=>settings.querySelector('.preview canvas:not([hidden])')&&settings.innerText.includes('Sheet 1 / 4 (Back)'));
           settings.querySelector('button[aria-label="Close details"]').click();
-          const filter=await wait(()=>studio.querySelector('.photo-main-tools select'));
+          const filter=await wait(()=>[...studio.querySelectorAll('.photo-main-tools select')].find(select=>[...select.options].some(option=>option.value==='mono')));
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(filter,'mono');
           filter.dispatchEvent(new Event('change',{bubbles:true}));
-          await wait(()=>studio.querySelector('.photo-review-panel [role="status"]')?.textContent.includes('Black & white applied to 2 photos'));
+          await wait(()=>[...studio.querySelectorAll('.photo-review-panel [role="status"]')].some(status=>status.textContent.includes('Black & white applied to 2 photos')));
           (await wait(()=>button('Edit photos'))).click();
           const editor=await wait(()=>document.querySelector('dialog[open][aria-label="Edit photos"]'));
           await wait(()=>editor.querySelectorAll('.photo-editor-order-item').length===2);
@@ -765,7 +768,15 @@ else void app.whenReady().then(async()=>{
         try{
           const prepared=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Photo preparation timeout')),60000);printViews.set(win.webContents.id,{data:{input:{id,...settings},files:photos},ready:error=>{clearTimeout(timer);error?reject(new Error(error)):resolve()}})});
           await Promise.all([win.loadURL(index+'?print=1'),prepared]);
-          const output=await win.webContents.executeJavaScript(`({first:document.querySelector('.sheet canvas').toDataURL(),sheets:document.querySelectorAll('.sheet').length})`);
+          const output=await win.webContents.executeJavaScript(`(async()=>{
+            const photo=await window.bloom.call('preview',{id:${JSON.stringify(photos.find(photo=>photo.mime==='image/jpeg')!.id)},compatibleImage:true});
+            const bitmap=await createImageBitmap(new Blob([photo.bytes],{type:photo.mime}));
+            const compatiblePhotoDecoded=photo.mime==='image/png'&&bitmap.width===600&&bitmap.height===400;
+            bitmap.close();
+            return {compatiblePhotoDecoded,first:document.querySelector('.sheet canvas').toDataURL(),sheets:document.querySelectorAll('.sheet').length,manifest:window.__printManifest};
+          })()`);
+          if(!output.compatiblePhotoDecoded)throw new Error('The print window could not decode the compatible PNG.');
+          if(output.manifest.hasColour||output.manifest.faces.some(Boolean))throw new Error('Black-and-white one-sided photo settings were not applied.');
           if(output.first!==preview.first)throw new Error('Photo preview and prepared output differ.');
           const exported=await win.webContents.printToPDF({preferCSSPageSize:true,printBackground:true,margins:{top:0,bottom:0,left:0,right:0}});await writeFile(join(root,'photo-prepared.pdf'),exported);
           await writeFile(join(root,'photo-smoke.json'),JSON.stringify({photos:photos.length,requestedPrints:8,sheets:output.sheets,previewMatchesPrepared:true,pdfExported:true,physicalPrintingExecuted:false,summary:preview.summary,landscapeGridVerified:preview.landscapeGridVerified,fullPageDuplexVerified:preview.fullPageDuplexVerified,singleScreenVerified:preview.singleScreenVerified}));

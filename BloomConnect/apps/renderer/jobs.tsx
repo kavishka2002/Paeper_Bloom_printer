@@ -8,7 +8,7 @@ import {paperNames} from '../../packages/printing/paper';
 import {BookletWizard,DocumentPricingSettings,DuplexOptions,DuplexTest,PrintEstimate,ProfessionalSettings} from './print-settings';
 import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
 import {planDocument,selectedPages,type DocumentInfo} from '../../packages/printing/plan';
-import {inspectDocument} from './pdf';
+import {inspectDocument,needsPixelAnalysis} from './pdf';
 import {useEffect,useId,useRef,useState,type FormEvent} from 'react';
 import {BookOpen,Files,FileText,Plus,Printer,ShoppingBag,Wallet} from 'lucide-react';
 import {colomboDay,DetailDrawer,PageLayoutChoices,RevenueChart,StatCard,Tabs} from './design';
@@ -103,7 +103,9 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  const [nup,setNup]=useState<NonNullable<Input<'print'>['nup']>>(1),[booklet,setBooklet]=useState(false),[binding,setBinding]=useState<'left'|'right'>('left');
  const [marginMm,setMargin]=useState(0),[gapMm,setGap]=useState(0),[borders,setBorders]=useState(false);
  const [basis,setBasis]=useState<'page'|'sheet'|'side'>('sheet'),[discount,setDiscount]=useState(0),[charge,setCharge]=useState(0),[saving,setSaving]=useState(false);
- const [infos,setInfos]=useState<Record<string,DocumentInfo>>({});
+ const [inspection,setInspection]=useState<{infos:Record<string,DocumentInfo>;analysed:boolean}>({infos:{},analysed:false});
+ const infos=inspection.infos;
+ const analyse=needsPixelAnalysis(advanced);
  const [counts,setCounts]=useState<Record<string,number>>({}),[countError,setCountError]=useState(''),[previewMode,setPreviewMode]=useState<'source'|'sheet'>('sheet');
  const docs=attachmentId?data.attachments.filter(a=>a.id===attachmentId):active?active.files.map(id=>data.attachments.find(a=>a.id===id)).filter((item):item is typeof data.attachments[number]=>!!item):data.attachments.filter(a=>a.status==='Ready');
  const preview=docs.find(a=>a.id===file)??(active||attachmentId?docs[0]:undefined);
@@ -116,12 +118,13 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
    // Bound PDF decoding and IPC memory: load metadata in sequence, releasing each worker.
    for(const item of files){
     if(item.status!=='Ready')throw new Error(item.name+' is not downloaded yet.');
-    metadata[item.id]=await inspectDocument(item.id);values[item.id]=metadata[item.id].pages.length;
+    if(!current)return;
+    metadata[item.id]=await inspectDocument(item.id,analyse);values[item.id]=metadata[item.id].pages.length;
    }
-   if(current){setCounts(values);setInfos(metadata)}
+   if(current){setCounts(values);setInspection({infos:metadata,analysed:analyse})}
   })().catch(e=>{if(current){setCounts({});setCountError(e.message??String(e))}});
   return()=>{current=false};
- },[fileKey]);
+ },[fileKey,analyse]);
  useEffect(()=>{
   if(attachmentId){if(active)setQuote(String(active.total/100));return}
   const previous=data.queue.find(entry=>entry.job_id===active?.id&&entry.settings&&['Submitted','Completed','Unconfirmed'].includes(entry.status));
@@ -197,7 +200,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  const automaticDuplex=isAutomaticDuplex(duplex);
  const manualFallback=!virtualPrinter&&automaticDuplex&&capabilities?.duplex===false;
  const inkMode=advanced.ink==='auto'||advanced.ink==='mixed'?'mixed':advanced.ink==='grayscale'?'grayscale':advanced.ink==='mono'?'mono':advanced.ink==='colour'||colour?'colour':'mono';
- const countsReady=files.length>0&&files.every(item=>counts[item.id]!==undefined);
+ const countsReady=files.length>0&&(!analyse||inspection.analysed)&&files.every(item=>counts[item.id]!==undefined);
  let calculation:ReturnType<typeof calculateBulk>|undefined,calculationError='';
  let calculations:{id:string;settings:CalculationInput}[]=[];
  try{

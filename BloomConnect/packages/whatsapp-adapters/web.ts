@@ -182,9 +182,9 @@ export class WebAdapter {
     };
     const poll=async()=>{
       if(this.stopped||this.ready||this.authStateInFlight||!this.authStatePoll)return;
-      if(!await page.evaluate(whatsappAccountIsReadyFromPage))return;
       this.authStateInFlight=true;
       try{
+        if(!await page.evaluate(whatsappAccountIsReadyFromPage)||this.stopped||this.ready||!this.authStatePoll)return;
         const installed=await page.evaluate(()=>typeof (window as Window&{onAppStateHasSyncedEvent?:()=>Promise<unknown>}).onAppStateHasSyncedEvent==='function');
         if(!installed)await this.runInject(inject);
         await page.evaluate(async()=>{
@@ -193,9 +193,8 @@ export class WebAdapter {
           await callback();
         });
       }catch(error){
-        this.authStateInFlight=false;
         reportFailure(error);
-      }
+      }finally{this.authStateInFlight=false}
     };
     this.authStatePoll=setInterval(()=>{void poll().catch(reportFailure)},1000);
     void poll().catch(reportFailure);
@@ -232,6 +231,25 @@ export class WebAdapter {
       webVersionCache:{type:'none'},
       takeoverOnConflict:false
     });
+    const afterBrowserInitialized=this.auth.afterBrowserInitialized.bind(this.auth);
+    this.auth.afterBrowserInitialized=async()=>{
+      await afterBrowserInitialized();
+      const page=client.pupPage;
+      if(!page)return;
+      const goto=page.goto;
+      // The linking UI and app runtime can start before background resources finish loading.
+      page.goto=async(url,options)=>{
+        page.goto=goto;
+        if(!/^https:\/\/web\.whatsapp\.com\/?$/.test(url))return goto.call(page,url,options);
+        const result=await goto.call(page,url,{...options,waitUntil:'domcontentloaded',timeout:40_000});
+        const ready=await page.waitForFunction(()=>{
+          const app=window as Window&{Debug?:{VERSION?:string};require?:unknown};
+          return /^\/login\/?$/.test(location.pathname)||Boolean(app.Debug?.VERSION&&typeof app.require==='function');
+        },{timeout:35_000});
+        await ready.dispose();
+        return result;
+      };
+    };
     client.on('qr',raw=>{
       if(this.stopped)return;
       if(typeof raw!=='string'||raw.length===0){
@@ -381,7 +399,7 @@ export class WebAdapter {
         previous=result;
         this.publishQr(Promise.resolve(result),'login page');
       }
-      await new Promise(resolve=>setTimeout(resolve,500));
+      await new Promise(resolve=>setTimeout(resolve,250));
     }
   }
   private supportCurrentQrLogin(client:Client){

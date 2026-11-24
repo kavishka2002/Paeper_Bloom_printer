@@ -103,6 +103,7 @@ function retryWeb(){
 let connection:Snapshot['connection']={status:'Disconnected',phone:'',webhook:false};
 let networkBusy=false;
 const inflight=new Set<string>();
+const mediaDownloads=new Map<string,Promise<void>>();
 const printFiles=(id:string)=>rows<{attachment_id:string}>('SELECT attachment_id FROM print_job_files WHERE job_id=? ORDER BY rowid',id).map(x=>x.attachment_id);
 const jobQuery='SELECT j.*,COALESCE((SELECT SUM(amount) FROM payments WHERE job_id=j.id),0) AS paid FROM print_jobs j';
 const attachmentFields='id,customer_id,message_id,name,mime,status,created,bytes';
@@ -210,12 +211,19 @@ async function saveMedia(id:string,bytes:Buffer){
   finally{await unlink(temp).catch(()=>{})}
   run("UPDATE attachments SET mime=?,status=?,bytes=?,hash=?,path=? WHERE id=?",mime,needsConversion?'Needs conversion':'Ready',bytes.length,hash,path,id);
 }
-async function receiveMedia(id:string){
-  if(inflight.has(id))return;
+function receiveMedia(id:string){
+  const existing=mediaDownloads.get(id);
+  if(existing)return existing;
+  const download=downloadMedia(id).finally(()=>mediaDownloads.delete(id));
+  mediaDownloads.set(id,download);
+  return download;
+}
+async function downloadMedia(id:string){
   const a=row<Attachment&{remote:string;account_id:string}>('SELECT a.*,m.account_id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?',id);
+  if(a&&['Ready','Needs conversion'].includes(a.status))return;
   const current=a?.account_id.startsWith('web:')?web:adapter;
   const account=current instanceof WebAdapter?current.account:current?.config.phoneId;
-  if(!a||['Ready','Needs conversion'].includes(a.status)||!current||a.account_id!==account)throw new Error('Connect the original WhatsApp account to retry this attachment.');
+  if(!a||!current||a.account_id!==account)throw new Error('Connect the original WhatsApp account to retry this attachment.');
   inflight.add(id);
   run("UPDATE attachments SET status='Downloading' WHERE id=?",id);changed();
   try{await saveMedia(id,await current.download(a.remote));const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{};delete retries[id];store.save('mediaRetries',retries);
@@ -242,26 +250,35 @@ setInterval(()=>{
   if(record?.account_id===(web?.account??adapter?.config.phoneId))void receiveMedia(id).catch(()=>{});
  }
 },5000).unref();
-async function reply(id:string,text:string,automated=false){
+function connectedWhatsAppAccount(){
+  return ['Connected','API reachable'].includes(connection.status)?(web?.account||adapter?.config.phoneId):undefined;
+}
+function notificationAccount(customer:string){
+  const account=web?.account||adapter?.config.phoneId||
+    (store.setting('whatsappProvider')==='web'?store.setting<string>('lastWebAccount'):undefined);
+  return account&&row('SELECT customer_id FROM conversations WHERE account_id=? AND customer_id=?',account,customer)?account:undefined;
+}
+class ReplyBlocked extends Error{}
+async function reply(id:string,text:string,automated=false,expectedAccount?:string){
   const current=web??adapter;
-  if(!current||!['API reachable','Connected'].includes(connection.status))throw new Error('WhatsApp is offline.');
+  const account=connectedWhatsAppAccount();
+  if(!current||!account||expectedAccount&&account!==expectedAccount)throw new ReplyBlocked('WhatsApp is offline.');
   const webReply=current instanceof WebAdapter?current:null;
-  const account=current instanceof WebAdapter?current.account:current.config.phoneId;
   const customer=row<Customer>('SELECT * FROM customers WHERE id=?',id);
   if(!customer)throw new Error('Customer not found.');
   const inbound=row<{created:string}>("SELECT MAX(created) created FROM messages WHERE customer_id=? AND account_id=? AND direction='incoming'",id,account);
   if(!webReply||automated){
     const age=Date.now()-Date.parse(inbound?.created??'');
     if(!Number.isFinite(age)||age<0||age>=86400000){
-      throw new Error(webReply?'Automatic replies require a customer message in the last 24 hours.':'The Meta Cloud API reply window has expired. Ask the customer to message you again before replying here.');
+      throw new ReplyBlocked(webReply?'Automatic replies require a customer message in the last 24 hours.':'The Meta Cloud API reply window has expired. Ask the customer to message you again before replying here.');
     }
   }
   if(webReply&&!row('SELECT customer_id FROM conversations WHERE account_id=? AND customer_id=?',account,id)){
-    throw new Error('Open an existing conversation from this linked WhatsApp account before sending a reply.');
+    throw new ReplyBlocked('Open an existing conversation from this linked WhatsApp account before sending a reply.');
   }
   const aliasPrefix='webContact:'+account+':';
   const alias=webReply?row<{key:string}>('SELECT key FROM settings WHERE substr(key,1,?)=? AND value=? ORDER BY key LIMIT 1',aliasPrefix.length,aliasPrefix,JSON.stringify(id))?.key.slice(aliasPrefix.length):undefined;
-  if(!customer.phone&&!alias)throw new Error('WhatsApp could not identify the recipient for this conversation.');
+  if(!customer.phone&&!alias)throw new ReplyBlocked('WhatsApp could not identify the recipient for this conversation.');
   const message=webReply?await webReply.send(customer.phone,text,alias):await current.send(customer.phone,text);
   run("INSERT INTO messages VALUES (?,?,?,?,?,'outgoing','accepted',?,0) ON CONFLICT(id) DO UPDATE SET status=CASE WHEN messages.status='history' THEN 'accepted' ELSE messages.status END",message,account,id,text,'text',now());return message;
 }
@@ -297,17 +314,19 @@ async function automation(event:Event){
             shop_name:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect'
           };
           const text=rule.text.replace(/\{(job_id|total_amount|customer_name|shop_name)\}/g,(_,key:string)=>values[key]);
-          if((rule.debounceSeconds??0)>0){
-            const account=web?.account??adapter?.config.phoneId;if(!account)throw new Error('Connect WhatsApp before scheduling automatic replies.');
-            const pending=event.jobId?undefined:row<{id:string}>("SELECT id FROM notification_outbox WHERE rule_id=? AND customer_id=? AND account_id=? AND status='Pending' AND due>? LIMIT 1",rule.id,event.customer,account,Date.now());
-            if(pending)run('UPDATE notification_outbox SET due=?,body=? WHERE id=?',Date.now()+rule.debounceSeconds!*1000,text,pending.id);
-            else run("INSERT INTO notification_outbox(id,rule_id,customer_id,account_id,event_key,body,status,due,created) VALUES (?,?,?,?,?,?,'Pending',?,?)",randomUUID(),rule.id,event.customer,account,eventKey,text,Date.now()+rule.debounceSeconds!*1000,now());
+          const account=notificationAccount(event.customer);
+          if(!account)throw new Error('This customer has no conversation with the configured WhatsApp account.');
+          const delay=(rule.debounceSeconds??0)*1000;
+          const due=Date.now()+delay;
+          if(delay||connectedWhatsAppAccount()!==account){
+            const pending=delay&&!event.jobId?row<{id:string}>("SELECT id FROM notification_outbox WHERE rule_id=? AND customer_id=? AND account_id=? AND status='Pending' AND due>? LIMIT 1",rule.id,event.customer,account,Date.now()):undefined;
+            if(pending)run('UPDATE notification_outbox SET due=?,body=? WHERE id=?',due,text,pending.id);
+            else run("INSERT INTO notification_outbox(id,rule_id,customer_id,account_id,event_key,body,status,due,created) VALUES (?,?,?,?,?,?,'Pending',?,?)",randomUUID(),rule.id,event.customer,account,eventKey,text,due,now());
             store.audit('Automation reply queued',rule.name);
           }else{
-            const logId=randomUUID(),account=web?.account??adapter?.config.phoneId??'';
+            const logId=randomUUID();
             run("INSERT INTO notification_outbox(id,rule_id,customer_id,account_id,event_key,body,status,due,created) VALUES (?,?,?,?,?,?,'Sending',?,?)",logId,rule.id,event.customer,account,eventKey,text,Date.now(),now());
-            const attempt=run("INSERT INTO notification_attempts(notification_id,attempted,result) VALUES (?,?,'Sending')",logId,now()).lastInsertRowid;
-            try{const message=await reply(event.customer,text,true);run("UPDATE notification_outbox SET status='Accepted',attempts=1,message_id=? WHERE id=?",message,logId);run("UPDATE notification_attempts SET result='Accepted' WHERE id=?",attempt)}catch(e){const reason=e instanceof Error?e.message:String(e);run("UPDATE notification_outbox SET status='Unconfirmed',attempts=1,error=? WHERE id=?",reason,logId);run("UPDATE notification_attempts SET result='Unconfirmed',error=? WHERE id=?",reason,attempt);throw e}
+            await sendNotification({id:logId,customer_id:event.customer,account_id:account,body:text});
           }
         }
       }
@@ -372,10 +391,14 @@ async function syncChatDocuments({id}:Input<'webChatSync'>){
     current.account,id);
   changed();
   void (async()=>{
-    for(const document of documents){
-      if(web!==current||connection.status!=='Connected')break;
-      await receiveMedia(document.id).catch(()=>{});
-    }
+    let next=0;
+    const download=async()=>{
+      while(next<documents.length&&web===current&&connection.status==='Connected'){
+        const {id}=documents[next++];
+        await receiveMedia(id).catch(()=>{});
+      }
+    };
+    await Promise.all([download(),download(),download()]);
   })();
   return {messages:messages.length,documents:messages.filter(message=>message.file).length,partial};
 }
@@ -556,20 +579,32 @@ run("UPDATE automation_executions SET status='Interrupted' WHERE status='Running
 run("UPDATE notification_outbox SET status='Unconfirmed',error='Application stopped during sending; verify delivery before any manual retry.' WHERE status='Sending'");
 run("UPDATE notification_attempts SET result='Unconfirmed',error='Application stopped during sending' WHERE result='Sending'");
 let notificationBusy=false;
+async function sendNotification(item:{id:string;customer_id:string;account_id:string;body:string}){
+ run("UPDATE notification_outbox SET status='Sending',attempts=attempts+1 WHERE id=?",item.id);
+ const attempt=run("INSERT INTO notification_attempts(notification_id,attempted,result) VALUES (?,?,'Sending')",item.id,now()).lastInsertRowid;
+ try{
+  const message=await reply(item.customer_id,item.body,true,item.account_id);
+  run("UPDATE notification_outbox SET status='Accepted',message_id=?,error='' WHERE id=?",message,item.id);
+  run("UPDATE notification_attempts SET result='Accepted' WHERE id=?",attempt);
+  store.audit('Automation reply accepted',item.id);
+ }catch(e){
+  const error=e instanceof Error?e.message:String(e);
+  const status=e instanceof ReplyBlocked?'Failed':'Unconfirmed';
+  run("UPDATE notification_outbox SET status=?,error=? WHERE id=?",status,error,item.id);
+  run("UPDATE notification_attempts SET result=?,error=? WHERE id=?",status,error,attempt);
+  throw e;
+ }
+}
 async function deliverNotifications(){
- if(shuttingDown||notificationBusy)return;notificationBusy=true;let touched=false;
- try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;attempts:number;event_key:string}>("SELECT * FROM notification_outbox WHERE status='Pending' AND due<=? ORDER BY due LIMIT 10",Date.now())){
-  if(shuttingDown)break;
+ const account=connectedWhatsAppAccount();
+ if(shuttingDown||notificationBusy||!account)return;
+ notificationBusy=true;let touched=false;
+ try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;event_key:string}>("SELECT * FROM notification_outbox WHERE account_id=? AND status='Pending' AND due<=? ORDER BY due LIMIT 10",account,Date.now())){
+  if(shuttingDown||connectedWhatsAppAccount()!==account)break;
   touched=true;const [event,jobId]=item.event_key.split(':');if(['pickup','print-completed'].includes(event)&&!allFilesConfirmed(jobId)){run("UPDATE notification_outbox SET status='Cancelled',error='Order files are not all confirmed printed' WHERE id=?",item.id);continue}
   const rule=snapshot().rules.find(r=>r.id===item.rule_id);
   if(!rule?.enabled){run("UPDATE notification_outbox SET status='Cancelled',error='Rule disabled' WHERE id=?",item.id);continue}
-  const account=web?.account??adapter?.config.phoneId;
-  if(account!==item.account_id||!['Connected','API reachable'].includes(connection.status)){
-   const attempts=item.attempts+1;run("INSERT INTO notification_attempts(notification_id,attempted,result,error) VALUES (?,?,'Offline','Original WhatsApp account is not connected')",item.id,now());run("UPDATE notification_outbox SET attempts=?,status=?,due=?,error='Original WhatsApp account is not connected' WHERE id=?",attempts,attempts>=5?'Failed':'Pending',Date.now()+Math.min(300000,5000*2**attempts),item.id);continue;
-  }
-  run("UPDATE notification_outbox SET status='Sending',attempts=attempts+1 WHERE id=?",item.id);
-  const attempt=run("INSERT INTO notification_attempts(notification_id,attempted,result) VALUES (?,?,'Sending')",item.id,now()).lastInsertRowid;
-  try{const message=await reply(item.customer_id,item.body,true);run("UPDATE notification_outbox SET status='Accepted',message_id=?,error='' WHERE id=?",message,item.id);run("UPDATE notification_attempts SET result='Accepted' WHERE id=?",attempt);store.audit('Automation reply accepted',item.id)}catch(e){const error=e instanceof Error?e.message:String(e);run("UPDATE notification_outbox SET status='Unconfirmed',error=? WHERE id=?",error,item.id);run("UPDATE notification_attempts SET result='Unconfirmed',error=? WHERE id=?",error,attempt);store.audit('Automation reply unconfirmed',item.id+' - verify delivery before retrying')}
+  await sendNotification(item).catch(e=>store.audit('Automation reply issue',e instanceof Error?e.message:String(e)));
 
  } }finally{notificationBusy=false;if(touched)changed()}
 }
@@ -792,7 +827,20 @@ const internal:Record<string,(input:never)=>unknown>={
     const id=randomUUID();run("INSERT INTO attachments (id,customer_id,name,status,created) VALUES (?,?,?,'Pending',?)",id,customer,basename(path).slice(0,180),now());
     try{await saveMedia(id,bytes);count++}catch(error){run("UPDATE attachments SET status='Failed' WHERE id=?",id);throw error}
   }return count},
-  async getPreview({id}:{id:string}){const a=readyFile(id);return {mime:a.mime,bytes:await readFile(join(mediaDir,a.path))}},
+  async getPreview({id,compatibleImage,imageMaxSide}:Input<'preview'>){
+    const attachment=readyFile(id),path=join(mediaDir,attachment.path);
+    if((compatibleImage||imageMaxSide)&&attachment.mime.startsWith('image/')){
+      try{
+        const image=sharp(path,{limitInputPixels:40_000_000}).autoOrient().toColourspace('srgb');
+        if(imageMaxSide)image.resize(imageMaxSide,imageMaxSide,{fit:'inside',withoutEnlargement:true});
+        return {mime:'image/png',bytes:await image.png({compressionLevel:imageMaxSide?1:6}).toBuffer()};
+      }catch{
+        if(!compatibleImage)return {mime:attachment.mime,bytes:await readFile(path)};
+        throw new Error(`Could not read photo "${attachment.name}". Re-import the original photo or export it as PNG and try again.`);
+      }
+    }
+    return {mime:attachment.mime,bytes:await readFile(path)};
+  },
   printable({id}:{id:string}){job(id);return printFiles(id).map(id=>{const a=readyFile(id);return {mime:a.mime,path:join(mediaDir,a.path),name:a.name,id}})},
   printStart(input:Input<"print">){return store.atomic(()=>{
     const {id,printer}=input;

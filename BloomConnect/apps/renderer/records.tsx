@@ -22,7 +22,10 @@ export function InboxView(){
  const [syncingChat,setSyncingChat]=useState('');
  const [chatSync,setChatSync]=useState<{id:string;text:string}>();
  const [selectedFiles,setSelectedFiles]=useState<string[]>([]);
- const [filePreview,setFilePreview]=useState<Attachment>();
+ const [previewFileId,setPreviewFileId]=useState('');
+ const [previewError,setPreviewError]=useState<{id:string;message:string}>();
+ const previewDownloadError=previewError?.id===previewFileId?previewError.message:'';
+ const filePreview=data.attachments.find(file=>file.id===previewFileId);
  const [detailsCustomer,setDetailsCustomer]=useState('');
  const [sending,setSending]=useState(false);
  const [convertingOffice,setConvertingOffice]=useState('');
@@ -64,8 +67,11 @@ export function InboxView(){
   else state.set({view:'Print Studio',job:'',customer:active.id,photoStudio:true,photoDraft:ids,lightenPhotoDraft:false});
  }
  function showFile(file:Attachment){
-  if(file.status==='Ready'){setDetailsCustomer('');setFilePreview(file)}
-  else if(['Failed','Available to download'].includes(file.status))void run('retryMedia',{id:file.id});
+  if(['Ready','Downloading','Failed','Available to download'].includes(file.status)){
+   setDetailsCustomer('');setPreviewError(undefined);setPreviewFileId(file.id);
+   if(['Failed','Available to download'].includes(file.status))void window.bloom.call('retryMedia',{id:file.id})
+    .then(()=>refresh()).catch(e=>setPreviewError({id:file.id,message:e instanceof Error?e.message:String(e)}));
+  }
   else state.set({attachment:file.id,view:'Documents'});
  }
  const messagesByCustomer=useMemo(()=>{
@@ -127,7 +133,7 @@ export function InboxView(){
  {!webConnected&&data.connection.status!=='API reachable'&&<Button className="secondary" onClick={()=>state.set({view:'Automation Engine'})}>Open connection settings</Button>}</div>}
  <div className="inbox-layout panel">
  <aside className="conversation-list"><div className="padded stack"><h2>Conversations</h2>{data.connection.mode==="web"&&data.connection.status==="Connected"&&<><Button className="secondary" disabled={data.connection.sync?.startsWith("Syncing")} onClick={()=>void run("webSync",null)}>Sync recent chats</Button>{data.connection.sync&&<p className="subtle" role="status">{data.connection.sync}</p>}</>}<input aria-label="Find a conversation" placeholder="Find a conversation" value={query} onChange={e=>setQuery(e.target.value)}/><label className="check"><input type="checkbox" checked={unread} onChange={e=>setUnread(e.target.checked)}/> Unread only</label></div>
- {conversations.map(({c,list})=><button key={c.id} className={'conversation '+(active?.id===c.id?'selected':'')} onClick={()=>{state.set({customer:c.id});setDraft('');setSelectedFiles([]);setFilePreview(undefined)}}><span className="avatar">{c.name[0]}</span><span><strong>{c.name}</strong><small>{c.phone}</small><small>{list.at(-1)?.body||list.at(-1)?.kind}</small><small>{stamp(list.at(-1)?.created??c.last)}</small></span>{list.some(unreadInboxMessage)&&<i className="unread unread-count" aria-label={list.filter(unreadInboxMessage).length+" unread"}>{list.filter(unreadInboxMessage).length}</i>}</button>)}
+ {conversations.map(({c,list})=><button key={c.id} className={'conversation '+(active?.id===c.id?'selected':'')} onClick={()=>{state.set({customer:c.id});setDraft('');setSelectedFiles([]);setPreviewFileId('')}}><span className="avatar">{c.name[0]}</span><span><strong>{c.name}</strong><small>{c.phone}</small><small>{list.at(-1)?.body||list.at(-1)?.kind}</small><small>{stamp(list.at(-1)?.created??c.last)}</small></span>{list.some(unreadInboxMessage)&&<i className="unread unread-count" aria-label={list.filter(unreadInboxMessage).length+" unread"}>{list.filter(unreadInboxMessage).length}</i>}</button>)}
  {!conversations.length&&<Empty title="No conversations found"><p>Search for a customer by name or number, or sync recent chats after connecting.</p></Empty>}</aside>
  <section className="chat"><label className="check quick-pdf-toggle"><input type="checkbox" checked={state.autoPdfPrint} onChange={event=>{const enabled=event.target.checked;localStorage.setItem('autoPdfPrint',enabled?'on':'off');state.set({autoPdfPrint:enabled})}}/> Open print preview for new PDFs</label>{active?<><div className="chat-title"><span className="avatar">{active.name[0]}</span><div><strong>{active.name}</strong><p>{active.phone}</p></div><Button className="secondary chat-details-toggle" onClick={()=>setDetailsCustomer(active.id)}>Customer details</Button></div><div ref={history} className="chat-history" onScroll={e=>{const area=e.currentTarget;followNewest.current=area.scrollHeight-area.scrollTop-area.clientHeight<60}}>{messages.map(m=>{
  const attachments=filesByMessage.get(m.id)??[];
@@ -176,13 +182,13 @@ export function InboxView(){
   </div>
  </div>)}</div>
  <h3>Previous orders</h3>{data.jobs.filter(j=>j.customer_id===active.id).map(j=><button className="file-link" key={j.id} onClick={()=>state.set({job:j.id,view:'Orders'})}>{j.id} · {orderStatusLabels[j.status]}</button>)}{data.jobs.some(j=>j.customer_id===active.id)&&<Button className="secondary" onClick={()=>state.set({view:'Print Studio',job:data.jobs.find(j=>j.customer_id===active.id)!.id})}>Quick print</Button>}<h3>Recent payments</h3>{data.payments.filter(payment=>data.jobs.some(job=>job.id===payment.job_id&&job.customer_id===active.id)).slice(0,4).map(payment=><small key={payment.id}>{money(payment.amount)} · {payment.method}</small>)}</div></DetailDrawer>}
- {filePreview&&<DetailDrawer title={filePreview.name} presentation="wide" onClose={()=>setFilePreview(undefined)}>
-  <div className="stack"><DocumentPreview id={filePreview.id}/>
+ {filePreview&&<DetailDrawer title={filePreview.name} presentation="wide" onClose={()=>setPreviewFileId('')}>
+  {filePreview.status==='Ready'?<div className="stack"><DocumentPreview key={filePreview.id} id={filePreview.id}/>
    <div className="actions">
-    {(filePreview.mime==='application/pdf'||filePreview.mime.startsWith('image/'))&&<Button onClick={()=>{setFilePreview(undefined);openPrintFiles([filePreview])}}>Print</Button>}
+    {(filePreview.mime==='application/pdf'||filePreview.mime.startsWith('image/'))&&<Button onClick={()=>{setPreviewFileId('');openPrintFiles([filePreview])}}>Print</Button>}
     <Button className="secondary" onClick={()=>void run('saveAttachment',{id:filePreview.id},'File saved')}>Download</Button>
    </div>
-  </div>
+  </div>:filePreview.status==='Needs conversion'?<Button onClick={()=>{setPreviewFileId('');state.set({attachment:filePreview.id,view:'Documents'})}}>Open in Documents</Button>:previewDownloadError||filePreview.status==='Failed'?<div className="stack"><p role="alert">{previewDownloadError||'Could not download this attachment.'}</p><Button onClick={()=>showFile(filePreview)}>Retry download</Button></div>:<p role="status">Downloading attachment…</p>}
  </DetailDrawer>}
  </div>
 }

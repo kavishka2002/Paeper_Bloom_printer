@@ -29,6 +29,14 @@ function pdf(bytes:Uint8Array,options?:{password?:string;isEvalSupported?:boolea
   });
 }
 async function image(bytes:Uint8Array,mime:string){const url=URL.createObjectURL(new Blob([new Uint8Array(bytes).buffer],{type:mime}));try{const img=new Image();img.src=url;await img.decode();return img}finally{URL.revokeObjectURL(url)}}
+async function photoImage(id:string,file:{bytes:Uint8Array;mime:string}){
+  try{return await image(file.bytes,file.mime)}
+  catch{
+    const compatible=await window.bloom.call('preview',{id,compatibleImage:true});
+    try{return await image(compatible.bytes,compatible.mime)}
+    catch{throw new Error('Could not load this photo for printing. Re-import the original photo or export it as PNG and try again.')}
+  }
+}
 async function canvasPage(doc:Awaited<ReturnType<typeof pdf>['promise']>,page:number,target:HTMLCanvasElement,scale:number){
   const source=await doc.getPage(page);
   const natural=source.getViewport({scale:1});
@@ -43,12 +51,16 @@ export async function documentPageCount(id:string){
   try{return (await task.promise).numPages}finally{await task.destroy()}
 }
 const infoCache=new Map<string,Promise<DocumentInfo>>();
-export function inspectDocument(id:string):Promise<DocumentInfo>{
-  const existing=infoCache.get(id);if(existing)return existing;
+export function needsPixelAnalysis(options:Partial<Pick<PrintSettings,'skipBlank'|'ink'|'colourRange'>>){
+  return !!options.skipBlank||((options.ink==='auto'||options.ink==='mixed')&&!options.colourRange?.trim());
+}
+export function inspectDocument(id:string,analyse=true):Promise<DocumentInfo>{
+  const key=analyse?id:'geometry:'+id;
+  const existing=infoCache.get(id)??infoCache.get(key);if(existing)return existing;
   const pending=(async()=>{
     const file=await window.bloom.call('preview',{id});
     if(file.mime!=='application/pdf'){
-      const img=await image(file.bytes,file.mime),canvas=document.createElement('canvas');
+      const img=await photoImage(id,file),canvas=document.createElement('canvas');
       const thumbnailScale=192/Math.max(img.width,img.height);canvas.width=Math.max(1,Math.round(img.width*thumbnailScale));canvas.height=Math.max(1,Math.round(img.height*thumbnailScale));
       canvas.getContext('2d')!.drawImage(img,0,0,canvas.width,canvas.height);
       return {id,mime:file.mime,pages:[{widthMm:img.width/96*25.4,heightMm:img.height/96*25.4,...analysePixels(canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data)}]};
@@ -58,16 +70,21 @@ export function inspectDocument(id:string):Promise<DocumentInfo>{
       const doc=await task.promise;if(doc.numPages>1000)throw new Error('Inspect at most 1000 pages in one document. Split a larger document first.');
       const pages:DocumentInfo['pages']=[];
       for(let number=1;number<=doc.numPages;number++){
-        const page=await doc.getPage(number),natural=page.getViewport({scale:1}),viewport=page.getViewport({scale:192/Math.max(natural.width,natural.height)}),canvas=document.createElement('canvas');
-        canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
-        await page.render({canvas,viewport}).promise;
-        pages.push({widthMm:natural.width*25.4/72,heightMm:natural.height*25.4/72,...analysePixels(canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data)});
-        canvas.width=0;canvas.height=0;page.cleanup();
+        const page=await doc.getPage(number),natural=page.getViewport({scale:1});
+        const dimensions={widthMm:natural.width*25.4/72,heightMm:natural.height*25.4/72};
+        if(analyse){
+          const viewport=page.getViewport({scale:192/Math.max(natural.width,natural.height)}),canvas=document.createElement('canvas');
+          canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+          await page.render({canvas,viewport}).promise;
+          pages.push({...dimensions,...analysePixels(canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data)});
+          canvas.width=0;canvas.height=0;
+        }else pages.push({...dimensions,blank:false,ink:'mono',coverage:0});
+        page.cleanup();
       }
       return {id,mime:file.mime,pages};
     }finally{await task.destroy()}
   })();
-  infoCache.set(id,pending);void pending.catch(()=>infoCache.delete(id));
+  infoCache.set(key,pending);void pending.catch(()=>{if(infoCache.get(key)===pending)infoCache.delete(key)});
   if(infoCache.size>40)infoCache.delete(infoCache.keys().next().value!);
   return pending;
 }
@@ -75,7 +92,7 @@ type Source={doc?:Awaited<ReturnType<typeof pdf>['promise']>;img?:HTMLImageEleme
 async function openSource(id:string):Promise<Source>{
   const file=await window.bloom.call('preview',{id});
   if(file.mime==='application/pdf'){const task=pdf(file.bytes);try{return {doc:await task.promise,close:()=>task.destroy()}}catch(e){await task.destroy();throw e}}
-  return {img:await image(file.bytes,file.mime),close:async()=>{}};
+  return {img:await photoImage(id,file),close:async()=>{}};
 }
 /** The same compositor is used for preview, Save as PDF, native GDI and Electron printing. */
 export async function renderPlannedSide(source:Source,info:DocumentInfo,plan:DocumentPlan,side:PlannedSide,target:HTMLCanvasElement,overlay=false){
@@ -173,10 +190,18 @@ export async function renderPlannedSide(source:Source,info:DocumentInfo,plan:Doc
     ctx.fillText(side.placements.map(p=>p.page).join(' / '),target.width-3*ppm,target.height-2*ppm,target.width*.5);
   }
 }
-export async function renderPhotoSheet(plan:DocumentPlan,side:PlannedSide,target:HTMLCanvasElement){
+export async function renderPhotoSheet(plan:DocumentPlan,side:PlannedSide,target:HTMLCanvasElement,images?:Map<string,HTMLImageElement>){
  target.width=Math.round(side.width*plan.settings.renderDpi/25.4);target.height=Math.round(side.height*plan.settings.renderDpi/25.4);
  const ctx=target.getContext('2d')!;ctx.fillStyle='white';ctx.fillRect(0,0,target.width,target.height);
- for(const id of new Set(side.placements.map(p=>p.file!))){const source=await openSource(id);try{await renderPlannedSide(source,await inspectDocument(id),plan,{...side,placements:side.placements.filter(p=>p.file===id)},target,true)}finally{await source.close()}}
+ for(const id of new Set(side.placements.map(p=>p.file!))){
+   const cached=images?.get(id);
+   const source:Source=cached?{img:cached,close:async()=>{}}:await openSource(id);
+   if(images&&source.img){
+     images.delete(id);images.set(id,source.img);
+     if(images.size>2)images.delete(images.keys().next().value!);
+   }
+   try{await renderPlannedSide(source,await inspectDocument(id),plan,{...side,placements:side.placements.filter(p=>p.file===id)},target,true)}finally{await source.close()}
+ }
 }
 type PhotoFrame={file:string;copy:number;sheet:number;x:number;y:number;width:number;height:number;rotation:number;resizing:boolean};
 export function ImposedPreview({id,input,photoIds,lockPhotoAspect,onPhotoMove}:{id:string;input:Input<'print'>;photoIds?:string[];lockPhotoAspect?:boolean;onPhotoMove?:(move:PhotoFrame)=>void}){
@@ -192,10 +217,14 @@ export function ImposedPreview({id,input,photoIds,lockPhotoAspect,onPhotoMove}:{
     let active=true;let source:Source|undefined;
     setLoading(true);setError('');
     const render=async()=>{
-      const info=await inspectDocument(id),options=JSON.parse(settings),plan=photoIds?.length?planPhotos(options,await Promise.all(photoIds.map(inspectDocument))):planDocument({...options,copies:options.fileCopies?.[id]??options.copies},info),sides=plannedOutput(plan);
+      const options=normalizedSettings(JSON.parse(settings));
+      const info=await inspectDocument(id,needsPixelAnalysis(options));
+      const plan=photoIds?.length?planPhotos(options,await Promise.all(photoIds.map(photo=>inspectDocument(photo)))):planDocument({...options,copies:options.fileCopies[id]??options.copies},info),sides=plannedOutput(plan);
       if(!sides.length)throw new Error('No sides in this selection.');
-      source=await openSource(id);if(!active)return;
-      const index=Math.min(side,sides.length-1),canvas=document.createElement('canvas');if(photoIds?.length)await renderPhotoSheet(plan,sides[index],canvas);else await renderPlannedSide(source,info,plan,sides[index],canvas);
+      if(!active)return;
+      const index=Math.min(side,sides.length-1),canvas=document.createElement('canvas');
+      if(photoIds?.length)await renderPhotoSheet(plan,sides[index],canvas);
+      else{source=await openSource(id);if(active)await renderPlannedSide(source,info,plan,sides[index],canvas)}
       if(active){const target=ref.current!;target.width=canvas.width;target.height=canvas.height;target.getContext('2d')!.drawImage(canvas,0,0);setTotal(sides.length);if(index!==side)setSide(index);visibleSide.current={side:sides[index],index}}
     };
     const start=()=>void render().catch(e=>{if(active)setError(e.message??String(e))}).finally(()=>{void source?.close();if(active)setLoading(false)});
@@ -267,13 +296,13 @@ export function DocumentThumbnail({id}:{id:string}){
     if(!visible)return;
     let active=true;
     const canvas=ref.current!;
-    void window.bloom.call('preview',{id}).then(async file=>{
+    void window.bloom.call('preview',{id,imageMaxSide:200}).then(async file=>{
       if(!active)return;
       if(file.mime==='application/pdf'){
         const task=pdf(file.bytes);
         try{const doc=await task.promise;if(active)await canvasPage(doc,1,canvas,.38)}finally{await task.destroy()}
       }else{
-        const source=await image(file.bytes,file.mime);if(!active)return;
+        const source=await photoImage(id,file);if(!active)return;
         const scale=Math.min(1,200/Math.max(source.width,source.height));
         canvas.width=Math.max(1,source.width*scale);canvas.height=Math.max(1,source.height*scale);
         canvas.getContext('2d')?.drawImage(source,0,0,canvas.width,canvas.height);
@@ -290,12 +319,12 @@ export function DocumentPreview({id,onCount}:{id:string;onCount?:(count:number)=
   const [page,setPage]=useState(1),[count,setCount]=useState(1),[error,setError]=useState(''),[loading,setLoading]=useState(true);
   useEffect(()=>{let active=true;const target=canvas.current!;void (async()=>{
     setLoading(true);setError('');
-    const file=await window.bloom.call('preview',{id});
+    const file=await window.bloom.call('preview',{id,imageMaxSide:1100});
     if(!active)return;
     if(file.mime==='application/pdf'){
       const task=pdf(file.bytes);try{const doc=await task.promise;if(!active)return;setCount(doc.numPages);onCount?.(doc.numPages);await canvasPage(doc,Math.min(page,doc.numPages),target,1.35)}finally{await task.destroy()}
     }else{
-      const img=await image(file.bytes,file.mime);if(!active)return;
+      const img=await photoImage(id,file);if(!active)return;
       const scale=Math.min(1,1100/Math.max(img.width,img.height));target.width=img.width*scale;target.height=img.height*scale;
       target.getContext('2d')!.drawImage(img,0,0,target.width,target.height);setCount(1);onCount?.(1);
     }
@@ -338,7 +367,7 @@ export async function preparePrint(){
     const photoFiles=files.filter(file=>!!options.photoItems[file.id]);
     if(photoFiles.length){const infos=await Promise.all(photoFiles.map(f=>inspectDocument(f.id))),plan=planPhotos(options,infos);all.push({file:photoFiles[0],info:infos[0],plan,sides:plannedOutput(plan)})}
     for(const file of files.filter(f=>!options.photoBatch&&!options.photoItems[f.id])){
-      const info=await inspectDocument(file.id),plan=planDocument({...options,copies:options.fileCopies[file.id]??options.copies},info);
+      const info=await inspectDocument(file.id,needsPixelAnalysis(options)),plan=planDocument({...options,copies:options.fileCopies[file.id]??options.copies},info);
       if(plan.needsConfirmation)throw new Error('Confirm uncertain colour analysis before printing.');
       all.push({file,info,plan,sides:plannedOutput(plan)});
     }
@@ -351,9 +380,10 @@ export async function preparePrint(){
     const style=document.createElement('style');style.textContent=`@page{size:${width}mm ${height}mm;margin:0}html,body,#root{margin:0;background:white!important}.sheet{width:${width}mm;height:${height}mm;break-after:page;overflow:hidden}.sheet:last-child{break-after:auto}.sheet canvas{display:block;width:100%;height:100%}`;document.head.append(style);
     const faces:boolean[]=[];let hasColour=false;
     for(const item of all){
-      const source=await openSource(item.file.id);
+      const source=item.plan.settings.photoBatch||item.sides.some(side=>side.placements.some(p=>p.file))?undefined:await openSource(item.file.id);
       const plan={...item.plan,settings:{...item.plan.settings,renderDpi}};
-      try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(side.placements.some(p=>p.file))await renderPhotoSheet(plan,side,canvas);else await renderPlannedSide(source,item.info,plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{await source.close()}
+      const images=new Map<string,HTMLImageElement>();
+      try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(!source)await renderPhotoSheet(plan,side,canvas,images);else await renderPlannedSide(source,item.info,plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{await source?.close()}
     }
     Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour,sides:dimensions.length,renderDpi}});
     window.printView.done('');
