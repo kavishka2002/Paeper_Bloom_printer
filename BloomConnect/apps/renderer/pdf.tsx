@@ -2,7 +2,7 @@ import {enhancePixels,sharpenPixels} from '../../packages/printing/image-process
 import {cleanDocument} from '../../packages/printing/scan-image';
 import {scanPresets} from '../../packages/shared/scan';
 import {useEffect,useRef,useState} from 'react';
-import {getDocument,GlobalWorkerOptions} from 'pdfjs-dist';
+import {getDocument,GlobalWorkerOptions,PDFDataRangeTransport} from 'pdfjs-dist';
 import worker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {planPhotos,planDocument,plannedOutput,placementGeometry,photoPlacementGeometry,analysePixels,type DocumentInfo,type PlannedSide,type DocumentPlan} from '../../packages/printing/plan';
 import {normalizedSettings,type PrintSettings} from '../../packages/printing/settings';
@@ -10,44 +10,76 @@ import {fitRasterDpi} from '../../packages/printing/raster-budget';
 import {orientedPaper} from '../../packages/printing/plan';
 import {duplexEdge,resolveDuplex} from '../../packages/printing/duplex';
 
-import type {Input} from '../../packages/shared/contracts';
+import type {FileReference,Input} from '../../packages/shared/contracts';
 GlobalWorkerOptions.workerSrc=worker;
 
 type PrintData={input:Input<'print'>;files:{id:string}[];testDuplex?:boolean};
 declare global{interface Window{printView:{load:()=>Promise<PrintData>;done:(error:string)=>void}}}
 export function openPdf(bytes:Uint8Array,password?:string){
-  return pdf(bytes,{password,isEvalSupported:false});
+  return pdf(bytes,{password});
 }
-function pdf(bytes:Uint8Array,options?:{password?:string;isEvalSupported?:boolean}){
+function pdf(source:Uint8Array|FileReference,options?:{password?:string}){
   const assets=new URL('./assets/pdfjs/',document.baseURI);
-  return getDocument({
-    data:bytes,...options,enableXfa:false,stopAtErrors:true,
+  const abort=new AbortController();
+  let failure:(error:Error)=>void=()=>{};
+  const range=source instanceof Uint8Array?undefined:new class extends PDFDataRangeTransport{
+    constructor(){super((source as FileReference).bytes,new Uint8Array(),true)}
+    override requestDataRange(begin:number,end:number){
+      const file=source as FileReference;
+      // PDF.js can request the entire file when recovering a damaged cross-reference table.
+      if(end-begin>64*1024**2){
+        failure(new Error('This PDF requires too much data at once. Ask for a fresh export of the original PDF.'));
+        return;
+      }
+      void fetch(file.url,{headers:{Range:`bytes=${begin}-${end-1}`},signal:abort.signal}).then(async response=>{
+        if(response.status!==206||response.headers.get('Content-Range')!==`bytes ${begin}-${end-1}/${file.bytes}`)
+          throw new Error('Could not read the saved PDF. Reopen the attachment and try again.');
+        const data=new Uint8Array(await response.arrayBuffer());
+        if(data.length!==end-begin)throw new Error('The saved PDF is incomplete.');
+        this.onDataRange(begin,data);
+      }).catch(error=>{if(!abort.signal.aborted)failure(error)});
+    }
+    override abort(){abort.abort()}
+  }();
+  const task=getDocument({
+    ...(source instanceof Uint8Array?{data:source}:{range,rangeChunkSize:256*1024,disableStream:true,disableAutoFetch:true}),
+    ...{...options,isEvalSupported:false},enableXfa:false,stopAtErrors:true,
     cMapUrl:new URL('cmaps/',assets).href,
     standardFontDataUrl:new URL('standard_fonts/',assets).href,
     wasmUrl:new URL('wasm/',assets).href,
     iccUrl:new URL('iccs/',assets).href
   });
+  if(!range)return {promise:task.promise,destroy:()=>task.destroy()};
+  const failed=new Promise<never>((_resolve,reject)=>{
+    failure=error=>{reject(error);void task.destroy().catch(()=>{})};
+  });
+  return {promise:Promise.race([task.promise,failed]),destroy:()=>task.destroy()};
 }
 async function image(bytes:Uint8Array,mime:string){const url=URL.createObjectURL(new Blob([new Uint8Array(bytes).buffer],{type:mime}));try{const img=new Image();img.src=url;await img.decode();return img}finally{URL.revokeObjectURL(url)}}
-async function photoImage(id:string,file:{bytes:Uint8Array;mime:string}){
-  try{return await image(file.bytes,file.mime)}
+async function photoImage(id:string,file:FileReference){
+  try{const img=new Image();img.src=file.url;await img.decode();return img}
   catch{
     const compatible=await window.bloom.call('preview',{id,compatibleImage:true});
     try{return await image(compatible.bytes,compatible.mime)}
     catch{throw new Error('Could not load this photo for printing. Re-import the original photo or export it as PNG and try again.')}
   }
 }
-async function canvasPage(doc:Awaited<ReturnType<typeof pdf>['promise']>,page:number,target:HTMLCanvasElement,scale:number){
+async function canvasPage(doc:Awaited<ReturnType<typeof pdf>['promise']>,page:number,target:HTMLCanvasElement,scale:number,signal?:AbortSignal){
   const source=await doc.getPage(page);
+  signal?.throwIfAborted();
   const natural=source.getViewport({scale:1});
   const viewport=source.getViewport({scale:Math.min(scale,1800/Math.max(natural.width,natural.height))});
   target.width=viewport.width;target.height=viewport.height;
-  await source.render({canvas:target,viewport}).promise;
+  const render=source.render({canvas:target,viewport});
+  const cancel=()=>render.cancel();
+  signal?.addEventListener('abort',cancel,{once:true});
+  try{await render.promise}finally{signal?.removeEventListener('abort',cancel);source.cleanup()}
+
 }
 export async function documentPageCount(id:string){
-  const file=await window.bloom.call('preview',{id});
+  const file=await window.bloom.call('fileReference',{id});
   if(file.mime!=='application/pdf')return 1;
-  const task=pdf(file.bytes);
+  const task=pdf(file);
   try{return (await task.promise).numPages}finally{await task.destroy()}
 }
 const infoCache=new Map<string,Promise<DocumentInfo>>();
@@ -58,14 +90,14 @@ export function inspectDocument(id:string,analyse=true):Promise<DocumentInfo>{
   const key=analyse?id:'geometry:'+id;
   const existing=infoCache.get(id)??infoCache.get(key);if(existing)return existing;
   const pending=(async()=>{
-    const file=await window.bloom.call('preview',{id});
+    const file=await window.bloom.call('fileReference',{id});
     if(file.mime!=='application/pdf'){
       const img=await photoImage(id,file),canvas=document.createElement('canvas');
       const thumbnailScale=192/Math.max(img.width,img.height);canvas.width=Math.max(1,Math.round(img.width*thumbnailScale));canvas.height=Math.max(1,Math.round(img.height*thumbnailScale));
       canvas.getContext('2d')!.drawImage(img,0,0,canvas.width,canvas.height);
       return {id,mime:file.mime,pages:[{widthMm:img.width/96*25.4,heightMm:img.height/96*25.4,...analysePixels(canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data)}]};
     }
-    const task=pdf(file.bytes);
+    const task=pdf(file);
     try{
       const doc=await task.promise;if(doc.numPages>1000)throw new Error('Inspect at most 1000 pages in one document. Split a larger document first.');
       const pages:DocumentInfo['pages']=[];
@@ -90,8 +122,8 @@ export function inspectDocument(id:string,analyse=true):Promise<DocumentInfo>{
 }
 type Source={doc?:Awaited<ReturnType<typeof pdf>['promise']>;img?:HTMLImageElement;close:()=>Promise<void>};
 async function openSource(id:string):Promise<Source>{
-  const file=await window.bloom.call('preview',{id});
-  if(file.mime==='application/pdf'){const task=pdf(file.bytes);try{return {doc:await task.promise,close:()=>task.destroy()}}catch(e){await task.destroy();throw e}}
+  const file=await window.bloom.call('fileReference',{id});
+  if(file.mime==='application/pdf'){const task=pdf(file);try{return {doc:await task.promise,close:()=>task.destroy()}}catch(e){await task.destroy();throw e}}
   return {img:await photoImage(id,file),close:async()=>{}};
 }
 /** The same compositor is used for preview, Save as PDF, native GDI and Electron printing. */
@@ -122,6 +154,7 @@ export async function renderPlannedSide(source:Source,info:DocumentInfo,plan:Doc
         scratch.width=Math.max(1,Math.ceil(viewport.width));scratch.height=Math.max(1,Math.ceil(viewport.height));
         await page.render({canvas:scratch,viewport}).promise;
       }
+      page.cleanup();
     }else{
       const img=source.img!,quarter=geometry.rotation%180!==0;
       const cropWidth=Math.max(1,Math.round(img.width*(crop?.width??1))),cropHeight=Math.max(1,Math.round(img.height*(crop?.height??1)));
@@ -296,10 +329,10 @@ export function DocumentThumbnail({id}:{id:string}){
     if(!visible)return;
     let active=true;
     const canvas=ref.current!;
-    void window.bloom.call('preview',{id,imageMaxSide:200}).then(async file=>{
+    void window.bloom.call('fileReference',{id}).then(async file=>{
       if(!active)return;
       if(file.mime==='application/pdf'){
-        const task=pdf(file.bytes);
+        const task=pdf(file);
         try{const doc=await task.promise;if(active)await canvasPage(doc,1,canvas,.38)}finally{await task.destroy()}
       }else{
         const source=await photoImage(id,file);if(!active)return;
@@ -317,18 +350,45 @@ export function DocumentPreview({id,onCount}:{id:string;onCount?:(count:number)=
   const canvas=useRef<HTMLCanvasElement>(null);
   const [zoom,setZoom]=useState(100);
   const [page,setPage]=useState(1),[count,setCount]=useState(1),[error,setError]=useState(''),[loading,setLoading]=useState(true);
-  useEffect(()=>{let active=true;const target=canvas.current!;void (async()=>{
+  const [source,setSource]=useState<{id:string;document?:Awaited<ReturnType<typeof pdf>['promise']>;image?:HTMLImageElement}>();
+  useEffect(()=>{
+    let active=true;
+    let task:ReturnType<typeof pdf>|undefined;
+    setSource(undefined);setPage(1);setCount(1);setLoading(true);setError('');
+    void (async()=>{
+      const file=await window.bloom.call('fileReference',{id});
+      if(!active)return;
+      if(file.mime==='application/pdf'){
+        task=pdf(file);
+        const document=await task.promise;
+        if(active)setSource({id,document});
+      }else{
+        const image=await photoImage(id,file);
+        if(active)setSource({id,image});
+      }
+    })().catch(error=>{if(active){setError(error.message);setLoading(false)}});
+    return ()=>{active=false;void task?.destroy().catch(()=>{})};
+  },[id]);
+  useEffect(()=>{
+    if(!source||source.id!==id)return;
+    const count=source.document?.numPages??1;
+    setCount(count);onCount?.(count);
+  },[source,id,onCount]);
+  useEffect(()=>{
+    if(!source||source.id!==id)return;
+    const abort=new AbortController(),target=canvas.current!;
     setLoading(true);setError('');
-    const file=await window.bloom.call('preview',{id,imageMaxSide:1100});
-    if(!active)return;
-    if(file.mime==='application/pdf'){
-      const task=pdf(file.bytes);try{const doc=await task.promise;if(!active)return;setCount(doc.numPages);onCount?.(doc.numPages);await canvasPage(doc,Math.min(page,doc.numPages),target,1.35)}finally{await task.destroy()}
-    }else{
-      const img=await photoImage(id,file);if(!active)return;
-      const scale=Math.min(1,1100/Math.max(img.width,img.height));target.width=img.width*scale;target.height=img.height*scale;
-      target.getContext('2d')!.drawImage(img,0,0,target.width,target.height);setCount(1);onCount?.(1);
-    }
-  })().catch(e=>{if(active)setError(String(e.message??e))}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[id,page,onCount]);
+    void (async()=>{
+      if(source.document)await canvasPage(source.document,Math.min(page,source.document.numPages),target,1.35,abort.signal);
+      else if(source.image){
+        const img=source.image,scale=Math.min(1,1100/Math.max(img.width,img.height));
+        target.width=img.width*scale;target.height=img.height*scale;
+        target.getContext('2d')!.drawImage(img,0,0,target.width,target.height);
+      }
+    })().catch(error=>{if(!abort.signal.aborted)setError(error.message)})
+      .finally(()=>{if(!abort.signal.aborted)setLoading(false)});
+    return ()=>abort.abort();
+  },[source,id,page]);
   return <div className="preview">{loading&&<div className="skeleton" role="status" aria-label="Rendering preview"/>}{error&&<p role="alert">{error}</p>}
    <div className="preview-stage"><canvas ref={canvas} hidden={!!error||loading} style={zoom===100?undefined:{width:zoom+'%',maxWidth:'none',maxHeight:'none',height:'auto'}}/></div>
    <div className="preview-controls">{count>1&&<><button disabled={page===1} onClick={()=>setPage(page-1)}>Previous</button><span>{page} / {count}</span><button disabled={page>=count} onClick={()=>setPage(page+1)}>Next</button></>}

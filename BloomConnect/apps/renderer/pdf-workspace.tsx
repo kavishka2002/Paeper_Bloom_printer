@@ -227,12 +227,14 @@ export function PdfWorkspace(){
     const convert=wordFile(item);
     const id=convert?await window.bloom.call('convertDocument',{id:item.id,mode:'pages',includeHidden:false}):item.id;
     if(!live.current)return [];
-    const payload=await window.bloom.call('preview',{id});
-    bytesAdded+=payload.bytes.length;
+    const payload=await window.bloom.call('fileReference',{id});
+    bytesAdded+=payload.bytes;
     if(bytesAdded>150*1024*1024)throw new Error('Select up to 150 MB of WhatsApp documents at a time.');
     const extension=payload.mime==='application/pdf'?'pdf':photoExtensions[payload.mime];
     const name=extension?item.name.replace(/\.(pdf|docx?|png|jpe?g|webp)$/i,'')+'.'+extension:item.name;
-    files.push(new File([new Uint8Array(payload.bytes)],name,{type:payload.mime}));
+    const response=await fetch(payload.url);
+    if(!response.ok)throw new Error('Could not open the saved WhatsApp attachment.');
+    files.push(new File([await response.blob()],name,{type:payload.mime}));
    }
    return files;
   },wordTool);

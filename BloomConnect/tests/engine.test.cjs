@@ -168,7 +168,7 @@ test('engine validates inputs, imports and deduplicates, persists billing and cr
 });
 test('signed Cloud events produce one customer, media record, automatic order and permitted reply',async()=>{
  const root=await mkdtemp(join(tmpdir(),'bloom-cloud-'));
- const engine=start(root,true);
+ const engine=start(root,true,{BLOOMCONNECT_TEST_LARGE_CLOUD:'1'});
  try{
   const {createHmac}=require('node:crypto');
   const config={version:'v25.0',phoneId:'1234567890',token:'unused-fixture-token-value',appSecret:'fixture-secret-material',verifyToken:'fixture-verify-token'};
@@ -183,7 +183,7 @@ test('signed Cloud events produce one customer, media record, automatic order an
   const body=JSON.stringify({object:'whatsapp_business_account',entry:[{changes:[{field:'messages',value:{
    metadata:{phone_number_id:config.phoneId},
    contacts:[{wa_id:sender,profile:{name:'Webhook test customer'}}],
-   messages:[{from:sender,id:'wamid.fixture-doc',timestamp:String(Math.floor(Date.now()/1000)),type:'document',document:{id:'123456789',filename:'print.pdf'}}]
+   messages:[{from:sender,id:'wamid.fixture-doc',timestamp:String(Math.floor(Date.now()/1000)),type:'document',document:{id:'123456789',filename:'\u0db4\u0dbb\u0dd3\u0d9a\u0dca\u0dc2\u0dab-\u6587\u4ef6.pdf'}}]
   }}]}]});
   const signature='sha256='+createHmac('sha256',config.appSecret).update(body).digest('hex');
   const event=header=>fetch(endpoint,{method:'POST',body,headers:{'x-hub-signature-256':header}});
@@ -199,7 +199,11 @@ test('signed Cloud events produce one customer, media record, automatic order an
   assert.equal(state.customers.length,1);
   assert.equal(state.customers[0].phone,sender);
   assert.equal(state.messages.length,1);
+  assert.equal(state.attachments[0].name,'\u0db4\u0dbb\u0dd3\u0d9a\u0dca\u0dc2\u0dab-\u6587\u4ef6.pdf');
   assert.equal(state.attachments[0].status,'Ready');
+  assert.equal(state.attachments[0].bytes,34*1024**2);
+  const reference=await engine.call('documentReference',{id:state.attachments[0].id});
+  assert.match(reference.name,/^[0-9a-f]{64}\.pdf$/);
   assert.equal(state.jobs.length,1);
   assert.deepEqual(state.jobs[0].files,[state.attachments[0].id]);
   await engine.call('rule',{id:'automatic-reply-test',name:'Automatic reply test',trigger:'message',keyword:'',actions:['reply'],text:'Automatic received.',enabled:true,graph:''});

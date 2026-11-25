@@ -8,6 +8,7 @@ import {DocumentPreview,DocumentThumbnail,documentPageCount} from './pdf';
 import {ScannerDialog} from './scanner';
 import {unreadInboxMessage,visibleInboxMessage} from './inbox-messages';
 const noCount=()=>{};
+const formatBytes=(bytes:number)=>bytes>=1024**3?`${(bytes/1024**3).toFixed(2)} GB`:bytes>=1024**2?`${(bytes/1024**2).toFixed(1)} MB`:`${Math.ceil(bytes/1024)} KB`;
 export function InboxView(){
  const {data,run,refresh,error}=useData(),state=useWorkspace(),[unread,setUnread]=useState(false),[query,setQuery]=useState(''),[draft,setDraft]=useState('');
  const selectedCustomer=data.customers.find(c=>c.id===state.customer);
@@ -67,9 +68,9 @@ export function InboxView(){
   else state.set({view:'Print Studio',job:'',customer:active.id,photoStudio:true,photoDraft:ids,lightenPhotoDraft:false});
  }
  function showFile(file:Attachment){
-  if(['Ready','Downloading','Failed','Available to download'].includes(file.status)){
+  if(['Ready','Pending','Downloading','Failed','Cancelled','Available to download'].includes(file.status)){
    setDetailsCustomer('');setPreviewError(undefined);setPreviewFileId(file.id);
-   if(['Failed','Available to download'].includes(file.status))void window.bloom.call('retryMedia',{id:file.id})
+   if(['Failed','Cancelled','Available to download'].includes(file.status))void window.bloom.call('retryMedia',{id:file.id})
     .then(()=>refresh()).catch(e=>setPreviewError({id:file.id,message:e instanceof Error?e.message:String(e)}));
   }
   else state.set({attachment:file.id,view:'Documents'});
@@ -185,12 +186,15 @@ export function InboxView(){
  </div>)}</div>
  <h3>Previous orders</h3>{data.jobs.filter(j=>j.customer_id===active.id).map(j=><button className="file-link" key={j.id} onClick={()=>state.set({job:j.id,view:'Orders'})}>{j.id} · {orderStatusLabels[j.status]}</button>)}{data.jobs.some(j=>j.customer_id===active.id)&&<Button className="secondary" onClick={()=>state.set({view:'Print Studio',job:data.jobs.find(j=>j.customer_id===active.id)!.id})}>Quick print</Button>}<h3>Recent payments</h3>{data.payments.filter(payment=>data.jobs.some(job=>job.id===payment.job_id&&job.customer_id===active.id)).slice(0,4).map(payment=><small key={payment.id}>{money(payment.amount)} · {payment.method}</small>)}</div></DetailDrawer>}
  {filePreview&&<DetailDrawer title={filePreview.name} presentation="wide" onClose={()=>setPreviewFileId('')}>
+  {filePreview.bytes>0&&<small>{formatBytes(filePreview.bytes)}</small>}
   {filePreview.status==='Ready'?<div className="stack"><DocumentPreview key={filePreview.id} id={filePreview.id}/>
    <div className="actions">
     {(filePreview.mime==='application/pdf'||filePreview.mime.startsWith('image/'))&&<Button onClick={()=>{setPreviewFileId('');openPrintFiles([filePreview])}}>Print</Button>}
     <Button className="secondary" onClick={()=>void run('saveAttachment',{id:filePreview.id},'File saved')}>Download</Button>
    </div>
-  </div>:filePreview.status==='Needs conversion'?<Button onClick={()=>{setPreviewFileId('');state.set({attachment:filePreview.id,view:'Documents'})}}>Open in Documents</Button>:previewDownloadError||filePreview.status==='Failed'?<div className="stack"><p role="alert">{previewDownloadError||'Could not download this attachment.'}</p><Button onClick={()=>showFile(filePreview)}>Retry download</Button></div>:<p role="status">Downloading attachment…</p>}
+  </div>:filePreview.status==='Needs conversion'?<Button onClick={()=>{setPreviewFileId('');state.set({attachment:filePreview.id,view:'Documents'})}}>Open in Documents</Button>:previewDownloadError||['Failed','Cancelled'].includes(filePreview.status)?<div className="stack"><p role="alert">{previewDownloadError||filePreview.download?.error||(filePreview.status==='Cancelled'?'Download cancelled.':'Could not download this attachment.')}</p><Button onClick={()=>showFile(filePreview)}>Retry download</Button></div>:<div className="stack"><p role="status">{filePreview.status==='Downloading'?'Downloading':'Waiting to download'} {formatBytes(filePreview.download?.bytes??0)}{filePreview.download?.total?' / '+formatBytes(filePreview.download.total):''}</p>
+   {filePreview.download?.total?<progress aria-label="Attachment download" max={filePreview.download.total} value={filePreview.download.bytes}/>:<progress aria-label="Attachment download"/>}
+   <Button onClick={()=>void run('cancelMedia',{id:filePreview.id})}>Cancel download</Button></div>}
  </DetailDrawer>}
  </div>
 }
@@ -315,5 +319,5 @@ export function Documents(){
  </>}</div></>:active.status==='Needs conversion'?<>
  {presentation&&<><label>PowerPoint output<select value={conversionMode} onChange={e=>setConversionMode(e.target.value as typeof conversionMode)}><option value="pages">Full-page slides (use for handouts)</option><option value="notes">Speaker notes pages</option><option value="outline">Outline</option></select></label><label className="check"><input type="checkbox" checked={includeHidden} onChange={e=>setIncludeHidden(e.target.checked)}/> Include hidden slides</label></>}
  <p>{active.mime.startsWith('image/')?'Conversion creates a separate PNG.':'Conversion creates a separate PDF using installed Office or LibreOffice for supported files. Check the preview before printing.'}</p><Button disabled={converting} onClick={()=>void convert()}>{converting?'Converting...':active.mime.startsWith('image/')?'Convert to PNG':'Convert to PDF'}</Button>{!active.mime.startsWith('image/')&&<Button className="secondary" disabled={converting} onClick={()=>void convert(true)}><Printer size={16}/> Convert &amp; print</Button>}
- </>:['Failed','Available to download'].includes(active.status)&&active.message_id?<Button onClick={()=>void run('retryMedia',{id:active.id})}>{active.status==='Failed'?'Retry download':'Download and preview'}</Button>:null}</div>:<Empty title="Select a file to preview"/>}</Panel>{scannerIds.length>0&&<ScannerDialog ids={scannerIds} onClose={()=>setScannerIds([])}/>}</div>
+ </>:['Failed','Cancelled','Available to download'].includes(active.status)&&active.message_id?<Button onClick={()=>void run('retryMedia',{id:active.id})}>{active.status==='Failed'?'Retry download':'Download and preview'}</Button>:null}</div>:<Empty title="Select a file to preview"/>}</Panel>{scannerIds.length>0&&<ScannerDialog ids={scannerIds} onClose={()=>setScannerIds([])}/>}</div>
 }

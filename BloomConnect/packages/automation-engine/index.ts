@@ -1,3 +1,4 @@
+import {storeDownload,identifyLargeMedia,storedMediaName,removePartialDownloads} from './media-storage';
 import {effectivePhotoPricing,findPhotoPricing,quotePhotos} from '../printing/photo-pricing';
 import {convertOfficeDocument,officeDocument,officeExtensions} from '../printing/office';
 import {Worker} from 'node:worker_threads';
@@ -22,6 +23,7 @@ import {billMessage} from '../shared/bill-message';
 
 const root=process.argv[2];
 const mediaDir=join(root,'documents');
+const mediaRecovery=removePartialDownloads(mediaDir);
 const store=openDatabase(join(root,'bloomconnect.sqlite'));
 const {db}=store;
 const run=(sql:string,...values:SQLInputValue[])=>db.prepare(sql).run(...values);
@@ -112,7 +114,10 @@ function retryWeb(){
 let connection:Snapshot['connection']={status:'Disconnected',phone:'',webhook:false};
 let networkBusy=false;
 const inflight=new Set<string>();
-const mediaDownloads=new Map<string,Promise<void>>();
+const mediaDownloads=new Map<string,{promise:Promise<void>;controller:AbortController}>();
+const downloadStatus=new Map<string,NonNullable<Attachment['download']>>();
+const downloadSlots=[Promise.resolve(),Promise.resolve()];
+let nextDownloadSlot=0;
 const printFiles=(id:string)=>rows<{attachment_id:string}>('SELECT attachment_id FROM print_job_files WHERE job_id=? ORDER BY rowid',id).map(x=>x.attachment_id);
 const jobQuery='SELECT j.*,COALESCE((SELECT SUM(amount) FROM payments WHERE job_id=j.id),0) AS paid FROM print_jobs j';
 const attachmentFields='id,customer_id,message_id,name,mime,status,created,bytes';
@@ -140,7 +145,7 @@ function snapshot():Snapshot{
   messages:activeAccount
     ?rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages WHERE account_id=? ORDER BY created',activeAccount)
     :connection.mode==='web'?[]:rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages ORDER BY created'),
-  attachments:rows('SELECT '+attachmentFields+' FROM attachments ORDER BY created DESC'),
+  attachments:rows<Attachment>('SELECT '+attachmentFields+' FROM attachments ORDER BY created DESC').map(file=>({...file,download:downloadStatus.get(file.id)})),
   jobs:rows<Job>(jobQuery+' ORDER BY j.id DESC').map(j=>({...j,files:printFiles(j.id),printSettings:JSON.parse(row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',j.id)?.settings??'null')??undefined,calculations:rows<{attachment_id:string;input:string;result:string}>('SELECT * FROM print_calculations WHERE job_id=?',j.id).map(c=>({id:c.attachment_id,settings:JSON.parse(c.input),result:JSON.parse(c.result)}))})),
   payments:rows('SELECT * FROM payments ORDER BY created DESC'),queue:rows('SELECT * FROM print_queue ORDER BY created DESC'),
   rules:automationRules(),
@@ -221,22 +226,57 @@ async function saveMedia(id:string,bytes:Buffer){
   finally{await unlink(temp).catch(()=>{})}
   run("UPDATE attachments SET mime=?,status=?,bytes=?,hash=?,path=? WHERE id=?",mime,needsConversion?'Needs conversion':'Ready',bytes.length,hash,path,id);
 }
-function receiveMedia(id:string){
-  const existing=mediaDownloads.get(id);
-  if(existing)return existing;
-  const download=downloadMedia(id).finally(()=>mediaDownloads.delete(id));
-  mediaDownloads.set(id,download);
-  return download;
+function mediaError(error:unknown){
+  const code=(error as NodeJS.ErrnoException)?.code;
+  if(code==='ENOSPC')return 'The documents drive is full. Free disk space and retry.';
+  if(code==='EACCES'||code==='EPERM')return 'BloomConnect could not write to its documents folder.';
+  const message=error instanceof Error?error.message:'';
+  if(/^(WhatsApp|Meta|Connect the original|Unexpected media|Large attachments|The attachment|Import a valid|Multi-page|The installed image)/.test(message))return message;
+  return 'The attachment download was interrupted or could not be read. Retry while WhatsApp is connected.';
 }
-async function downloadMedia(id:string){
+function receiveMedia(id:string):Promise<void>{
+  const existing=mediaDownloads.get(id);
+  if(existing)return existing.controller.signal.aborted?existing.promise.catch(()=>{}).then(()=>receiveMedia(id)):existing.promise;
+  const controller=new AbortController();
+  run("UPDATE attachments SET status='Pending' WHERE id=? AND remote IS NOT NULL AND status IN ('Available to download','Cancelled','Failed')",id);
+  changed();
+  const index=nextDownloadSlot++%downloadSlots.length;
+  const promise=downloadSlots[index].then(()=>downloadMedia(id,controller.signal)).finally(()=>mediaDownloads.delete(id));
+  downloadSlots[index]=promise.catch(()=>{});
+  mediaDownloads.set(id,{promise,controller});
+  return promise;
+}
+async function downloadMedia(id:string,signal:AbortSignal){
+  if(signal.aborted)return;
   const a=row<Attachment&{remote:string;account_id:string}>('SELECT a.*,m.account_id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?',id);
   if(a&&['Ready','Needs conversion'].includes(a.status))return;
   const current=a?.account_id.startsWith('web:')?web:adapter;
   const account=current instanceof WebAdapter?current.account:current?.config.phoneId;
-  if(!a||!current||a.account_id!==account)throw new Error('Connect the original WhatsApp account to retry this attachment.');
+  if(!a||!current||a.account_id!==account){
+    const message='Connect the original WhatsApp account to retry this attachment.';
+    if(a){
+      run("UPDATE attachments SET status='Failed' WHERE id=?",id);
+      downloadStatus.set(id,{bytes:0,error:message});changed();
+    }
+    throw new Error(message);
+  }
   inflight.add(id);
-  run("UPDATE attachments SET status='Downloading' WHERE id=?",id);changed();
-  try{await saveMedia(id,await current.download(a.remote));const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{};delete retries[id];store.save('mediaRetries',retries);
+  run("UPDATE attachments SET status='Downloading' WHERE id=?",id);
+  downloadStatus.set(id,{bytes:0});changed();
+  let lastUpdate=0;
+  try{
+    await mediaRecovery;
+    const source=await current.download(a.remote,signal);
+    const saved=await storeDownload(mediaDir,source,signal,(bytes,total)=>{
+      if(Date.now()-lastUpdate<300)return;
+      lastUpdate=Date.now();downloadStatus.set(id,{bytes,total});changed();
+    },async(path,bytes)=>{
+      if(bytes<=32*1024*1024)return identify(await readFile(path),a.name);
+      return identifyLargeMedia(path);
+    });
+    run("UPDATE attachments SET mime=?,status=?,bytes=?,hash=?,path=? WHERE id=?",saved.mime,saved.needsConversion?'Needs conversion':'Ready',saved.bytes,saved.hash,saved.path,id);
+    downloadStatus.delete(id);
+    const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{};delete retries[id];store.save('mediaRetries',retries);
     const message=a.message_id?row<Message>('SELECT * FROM messages WHERE id=?',a.message_id):undefined;
     if(message?.status==='history'||message?.direction==='outgoing')return;
     const fresh=row<Attachment>('SELECT * FROM attachments WHERE id=?',id)!;
@@ -246,7 +286,9 @@ async function downloadMedia(id:string){
     await automation({id,kind,customer:a.customer_id,file:id});
     if(kind==='pdf')await automation({id,kind:'document',customer:a.customer_id,file:id});
   }catch(error){if(!['Ready','Needs conversion'].includes(row<Attachment>('SELECT * FROM attachments WHERE id=?',id)?.status??'')){
+      if(signal.aborted){run("UPDATE attachments SET status='Cancelled' WHERE id=?",id);downloadStatus.delete(id);return}
       run("UPDATE attachments SET status='Failed' WHERE id=?",id);
+      downloadStatus.set(id,{bytes:0,error:mediaError(error)});
       const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{},attempt=(retries[id]?.attempt??0)+1;
       retries[id]={attempt,due:Date.now()+Math.min(300000,5000*2**attempt)};store.save('mediaRetries',retries);
     }store.audit('Attachment processing issue',a.name+' - '+(error instanceof Error?error.message:String(error)));throw error} 
@@ -732,6 +774,16 @@ const handlers:HandlerMap={
     else run('UPDATE messages SET unread=0 WHERE customer_id=?',id);
   },
   retryMedia:({id})=>receiveMedia(id),
+  cancelMedia({id}){
+    const active=mediaDownloads.get(id);
+    const file=row<Attachment>('SELECT * FROM attachments WHERE id=?',id);
+    if(!file?.message_id||['Ready','Needs conversion'].includes(file.status))return;
+    active?.controller.abort();
+    const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{};
+    delete retries[id];store.save('mediaRetries',retries);
+    run("UPDATE attachments SET status='Cancelled' WHERE id=?",id);
+    downloadStatus.delete(id);
+  },
   order:input=>store.atomic(()=>createOrder(input)),
   quote({id,total,reason}){store.atomic(()=>{const prior=job(id);if(total<prior.paid)throw new Error('The total cannot be below the amount already paid.');
     run('UPDATE print_jobs SET total=? WHERE id=?',total,id);store.audit('Order total updated',id+' · LKR '+(prior.total/100).toFixed(2)+' → '+(total/100).toFixed(2)+' - '+reason)})},
@@ -851,7 +903,7 @@ const handlers:HandlerMap={
     run('INSERT INTO automation_rules VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',rule.id,JSON.stringify(rule));store.audit('Rule saved',rule.name)},
   testRule({id}){const r=automationRules().find(x=>x.id===id);if(!r)throw new Error('Save the rule first.');const event={id:'local',kind:r.trigger==='keyword'?'message':r.trigger,customer:null,text:r.keyword};const matched=matches({...r,enabled:true},event);store.audit('Workflow test',r.name+' · '+(matched?r.actions.join(', ')+' matched (dry run)':'no match'))}
 };
-function readyFile(id:string){const a=row<Attachment&{path:string}>("SELECT * FROM attachments WHERE id=? AND status='Ready'",id);if(!a||!a.path)throw new Error('The file is not available.');return a}
+function readyFile(id:string){const a=row<Attachment&{path:string}>("SELECT * FROM attachments WHERE id=? AND status='Ready'",id);if(!a||!storedMediaName.test(a.path))throw new Error('The file is not available.');return a}
 const internal:Record<string,(input:never)=>unknown>={
   webhookAddress(){if(process.env.BLOOMCONNECT_TEST_WEBHOOK!=='1')throw new Error('Unavailable.');return server.address()},
   async restoreConnection(input:Input<'connect'>){if(store.setting('whatsappProvider')==='web'||web||webTransition)return;adapter=new CloudAdapter(schemas.connect.parse(input));connection={status:'Checking',phone:'',webhook:false};void probe()},
@@ -861,18 +913,26 @@ const internal:Record<string,(input:never)=>unknown>={
     const id=randomUUID();run("INSERT INTO attachments (id,customer_id,name,status,created) VALUES (?,?,?,'Pending',?)",id,customer,basename(path).slice(0,180),now());
     try{await saveMedia(id,bytes);count++}catch(error){run("UPDATE attachments SET status='Failed' WHERE id=?",id);throw error}
   }return count},
+  startMedia({id}:Input<'retryMedia'>){
+    const input=schemas.retryMedia.parse({id});
+    void receiveMedia(input.id).catch(()=>{});
+  },
+  documentReference({id}:{id:string}){const file=readyFile(id);return {mime:file.mime,name:file.path}},
   async getPreview({id,compatibleImage,imageMaxSide}:Input<'preview'>){
     const attachment=readyFile(id),path=join(mediaDir,attachment.path);
     if((compatibleImage||imageMaxSide)&&attachment.mime.startsWith('image/')){
       try{
         const image=sharp(path,{limitInputPixels:40_000_000}).autoOrient().toColourspace('srgb');
         if(imageMaxSide)image.resize(imageMaxSide,imageMaxSide,{fit:'inside',withoutEnlargement:true});
-        return {mime:'image/png',bytes:await image.png({compressionLevel:imageMaxSide?1:6}).toBuffer()};
+        const bytes=await image.png({compressionLevel:imageMaxSide?1:6}).toBuffer();
+        if(bytes.length>32*1024*1024)throw new Error('Image conversion exceeds the preview limit.');
+        return {mime:'image/png',bytes};
       }catch{
-        if(!compatibleImage)return {mime:attachment.mime,bytes:await readFile(path)};
+        if(!compatibleImage&&attachment.bytes<=32*1024*1024)return {mime:attachment.mime,bytes:await readFile(path)};
         throw new Error(`Could not read photo "${attachment.name}". Re-import the original photo or export it as PNG and try again.`);
       }
     }
+    if(attachment.bytes>32*1024*1024)throw new Error('Open this attachment using its local file reference.');
     return {mime:attachment.mime,bytes:await readFile(path)};
   },
   printable({id}:{id:string}){job(id);return printFiles(id).map(id=>{const a=readyFile(id);return {mime:a.mime,path:join(mediaDir,a.path),name:a.name,id}})},
@@ -919,7 +979,7 @@ const internal:Record<string,(input:never)=>unknown>={
     return {order,customer:customer?.name??'Walk-in',shop:store.setting<Input<'setup'>>('shop')?.shop??'BloomConnect',
       files:printFiles(id).map(file=>row<{name:string}>('SELECT name FROM attachments WHERE id=?',file)?.name??'Document')};
   },
-  attachmentData({id}:{id:string}){const file=readyFile(id);return {name:file.name,path:join(mediaDir,file.path)}},
+  attachmentData({id}:{id:string}){const file=readyFile(id);return {name:file.name,mime:file.mime,path:join(mediaDir,file.path)}},
   async saveBackup({path}:{path:string}){await mkdir(join(path,'documents'),{recursive:true});run('VACUUM INTO ?',join(path,'bloomconnect.sqlite'));try{for(const file of await readdir(mediaDir))if(/^[a-f0-9]{64}\./.test(file)&&['pdf','jpg','png','webp','tiff','heic',...officeExtensions].some(ext=>file.endsWith('.'+ext)))await copyFile(join(mediaDir,file),join(path,'documents',file))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}return true}
 };
 process.on('message',async(message:{id:number;operation:string;input:never})=>{
@@ -933,7 +993,7 @@ process.on('message',async(message:{id:number;operation:string;input:never})=>{
     const result=handler?await handler(message.input):await publicHandler!(schemas[operation].parse(message.input));
     process.send?.({id:message.id,result});
   }catch(error){const detail=error instanceof Error?error.message:'Operation failed.';process.send?.({id:message.id,error:detail.includes('UNIQUE constraint')?'This record already exists.':detail})}
-  finally{if(!['snapshot','getPreview','printable','receiptData','billData','attachmentData','notificationLog','pricingRules','printPresets','scanPreview','cancelScan'].includes(message.operation))changed()}
+  finally{if(!['snapshot','getPreview','documentReference','printable','receiptData','billData','attachmentData','notificationLog','pricingRules','printPresets','scanPreview','cancelScan'].includes(message.operation))changed()}
 });
 
 if(store.setting('whatsappProvider')==='web')void connectWeb().catch(()=>{});
@@ -943,6 +1003,7 @@ function shutdown(){
   webOperation++;
   if(webRetry)clearTimeout(webRetry);
   server.close();
+  for(const download of mediaDownloads.values())download.controller.abort();
   const connectionToStop=web??stoppingWeb;
   web=undefined;
   stoppingWeb=undefined;

@@ -5,7 +5,6 @@ import {Client, LocalAuth, type Chat, type Contact, type Message} from 'whatsapp
 import QRCode from 'qrcode';
 import {launch,type Browser,type ConsoleMessage,type HTTPRequest,type Page} from 'puppeteer-core';
 import {installWhatsAppAuthStateFallback,whatsappAccountIsReadyFromPage,whatsappAuthStateFromPage} from './auth-state';
-import {collect} from './cloud';
 export {whatsappAuthStateFromPage} from './auth-state';
 
 export type WebMessage={id:string;phone:string;name:string;kind:string;text:string;created:string;chat?:string;outgoing?:boolean;file?:{remote:string;name:string}};
@@ -612,13 +611,14 @@ export class WebAdapter {
     for(let i=0;i<chats.length;i+=4)await Promise.all(chats.slice(i,i+4).map(sync));
     return {chats:chats.length,failed,imported};
   }
-  async download(id:string){
+  async download(id:string,signal:AbortSignal){
+    signal.throwIfAborted();
     if(!this.ready)throw new Error('WhatsApp Web is offline.');
     const msg=this.incoming.get(id)??await this.client!.getMessageById(id);
     if(!msg?.hasMedia)throw new Error('WhatsApp Web no longer has this attachment.');
-    const media=await msg.downloadMediaStream();
+    const media=await msg.downloadMediaStream({chunkSize:1024*1024});
     if(!media)throw new Error('WhatsApp Web did not return the attachment.');
-    return collect(media.stream,32*1024*1024);
+    return {stream:media.stream as AsyncIterable<Uint8Array>,size:typeof media.filesize==='number'&&Number.isSafeInteger(media.filesize)&&media.filesize>0?media.filesize:undefined};
   }
   async send(phone:string,text:string,knownChat?:string){
     if(!this.ready)throw new Error('WhatsApp Web is offline.');

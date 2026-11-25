@@ -1,3 +1,4 @@
+import {issueReference,serveReference} from './document-protocol';
 import {mkdirSync} from 'node:fs';
 import {queryCapabilities,openPrinterDialog,windowsBridge} from '../../packages/printing/windows';
 import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,submissionDuplex,validateSubmissionPrinter} from '../../packages/printing/capabilities';
@@ -35,6 +36,10 @@ const printViews=new Map<number,{data:unknown;ready:(error:string)=>void}>();
 const index='bloom://workspace/index.html';
 const startupUrl='bloom://workspace/startup.html';
 protocol.registerSchemesAsPrivileged([{scheme:'bloom',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}}]);
+async function fileReference(input:Input<'fileReference'>){
+  const file=await engine<{name:string}>('documentReference',input);
+  return issueReference(join(root,'documents'),file.name);
+}
 const vault=()=>join(root,'credentials.dpapi');
 function engine<T=unknown>(operation:string,input:unknown):Promise<T>{
   return new Promise((resolve,reject)=>{
@@ -327,6 +332,10 @@ else void app.whenReady().then(async()=>{
   licensing=openOfflineLicense(root);
   protocol.handle('bloom',request=>{
     const url=new URL(request.url);
+    if(url.pathname.startsWith('/document/')){
+      if(!licensing.status().allowed)return new Response(null,{status:403});
+      return serveReference(join(root,'documents'),request).catch(()=>new Response(null,{status:404}));
+    }
     if(request.method!=='GET'||url.host!=='workspace'||!/^\/(?:index\.html|startup\.(?:html|css)|bloomconnect-logo\.png|assets\/(?:pdfjs\/(?:cmaps|standard_fonts|wasm|iccs)\/)?[\w-]+(?:\.[\w-]+)*)$/.test(url.pathname))return new Response('Not found',{status:404});
     return net.fetch(pathToFileURL(join(__dirname,'ui',url.pathname.slice(1))).href);
   });
@@ -383,8 +392,11 @@ else void app.whenReady().then(async()=>{
     if(typeof operation!=='string'||!Object.hasOwn(schemas,operation))throw new Error('Invalid operation.');
     const op=operation as Operation;
     if(!trusted(event)){
-      if(op==='preview'&&printViews.has(event.sender.id)&&event.senderFrame?.url===index+'?print=1'){
-        const input=schemas.preview.parse(data);return engine('getPreview',input);
+      const print=printViews.get(event.sender.id)?.data as {files:{id:string}[]}|undefined;
+      if((op==='preview'||op==='fileReference')&&print&&event.senderFrame?.url===index+'?print=1'){
+        const input=schemas[op].parse(data);
+        if(!print.files.some(file=>file.id===input.id))throw new Error('Unauthorized print file.');
+        return op==='fileReference'?fileReference(input):engine('getPreview',input);
       }
       throw new Error('Unauthorized request.');
     }
@@ -436,15 +448,17 @@ else void app.whenReady().then(async()=>{
         lastStudioOutput=selection.filePath;
         return true;
       }
+      case 'fileReference':return fileReference(schemas.fileReference.parse(input));
+      case 'retryMedia':return engine('startMedia',input);
       case 'preview':return engine('getPreview',input);
       case 'print':return printOrder(schemas.print.parse(input));
       case 'exportScannedPdf':{
         const {id}=schemas.exportScannedPdf.parse(input);
         const selected=await dialog.showSaveDialog(main,{defaultPath:'BloomConnect processed scan.pdf',filters:[{name:'PDF',extensions:['pdf']}]});
         if(selected.canceled||!selected.filePath)return false;
-        const file=await engine<{mime:string;bytes:Uint8Array}>('getPreview',{id});
+        const file=await engine<{mime:string;path:string}>('attachmentData',{id});
         if(file.mime!=='application/pdf')throw new Error('Select a processed PDF to export.');
-        await writeFile(selected.filePath,file.bytes);return true;
+        await copyFile(file.path,selected.filePath);return true;
       }
       case 'backup':{
         const selection=await dialog.showOpenDialog(main,{properties:['openDirectory','createDirectory']});if(selection.canceled)return false;

@@ -16,7 +16,7 @@ export function useStudioWhatsAppChats(){
  },[customers,messages,attachments]);
 }
 export const chatLabel=(owner:ReturnType<typeof useStudioWhatsAppChats>[number])=>owner.phone?owner.name+' · '+owner.phone:owner.name;
-const downloadState=(file:Attachment)=>['Available to download','Failed'].includes(file.status);
+const downloadState=(file:Attachment)=>['Available to download','Failed','Cancelled','Pending','Downloading'].includes(file.status);
 function pendingFileType(file:Attachment,kind?:string):Attachment|undefined{
  const extension=file.name.split('.').at(-1)?.toLowerCase();
  if(extension==='pdf')return {...file,status:'Ready',mime:'application/pdf'};
@@ -29,7 +29,7 @@ export function StudioWhatsAppPicker({accept,onOpen,onClose,busy,failure,chat,se
  accept:(file:Attachment)=>boolean;onOpen:(files:Attachment[])=>Promise<boolean>;onClose:()=>void;busy:boolean;failure:string;chat:string;setChat:(id:string)=>void;single?:boolean;
  fileType:'pdf'|'photo'|'word';setScanType?:(value:'pdf'|'photo')=>void;
 }){
- const {data,refresh}=useData();
+ const {data,refresh,run}=useData();
  const allChats=useStudioWhatsAppChats();
  const [customer,setCustomer]=useState(''),[document,setDocument]=useState(''),[selected,setSelected]=useState<string[]>([]),[shown,setShown]=useState(50);
  const [updating,setUpdating]=useState(''),[notice,setNotice]=useState(''),[chatError,setChatError]=useState('');
@@ -92,8 +92,13 @@ export function StudioWhatsAppPicker({accept,onOpen,onClose,busy,failure,chat,se
    <div className="studio-whatsapp-results">
     {visible.slice(0,shown).map(file=>{
      if(downloadState(file))return <div className="studio-whatsapp-file studio-whatsapp-download" key={file.id}>
-      <span><strong>{file.name}</strong></span>
-      <Button className="secondary" disabled={busy||!!updating} onClick={()=>void download(file)}>{updating===file.id?'Downloading…':file.status==='Failed'?'Retry download':'Download'}</Button>
+      <span><strong>{file.name}</strong>{file.download?.error&&<small role="alert">{file.download.error}</small>}</span>
+      {['Pending','Downloading'].includes(file.status)?<>
+       <span role="status">{file.status==='Pending'?'Waiting to download':'Downloading'}
+        {file.download?.total?<progress aria-label="Attachment download" max={file.download.total} value={file.download.bytes}/>:<progress aria-label="Attachment download"/>}
+       </span>
+       <Button className="secondary" onClick={()=>void run('cancelMedia',{id:file.id})}>Cancel download</Button>
+      </>:<Button className="secondary" disabled={busy||!!updating} onClick={()=>void download(file)}>{updating===file.id?'Downloading…':file.status==='Failed'?'Retry download':'Download'}</Button>}
      </div>;
      return <label className="studio-whatsapp-file" key={file.id}>
       <input type={single?'radio':'checkbox'} name={single?'studio-whatsapp-source':undefined} aria-label={'Select '+file.name} checked={selected.includes(file.id)} disabled={busy||selected.length>=40&&!selected.includes(file.id)}

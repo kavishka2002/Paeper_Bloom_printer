@@ -71,6 +71,11 @@ async function checkWorkflow(){
    window.bloom={call:async(op,input)=>{
     if(op==='printerDialog'){window.printerDialogRequest=input;return}
     if(op==='testDuplex'){window.duplexTestRequest=input;return}
+    if(op==='fileReference'){
+     const image=input.id.startsWith('photo-'), mime=image?'image/png':'application/pdf', data=image?photoBytes:bytes;
+     const url=URL.createObjectURL(new Blob([data],{type:mime}));
+     return {mime,bytes:data.length,url};
+    }
     if(op==='preview')return input.id.startsWith('photo-')?{mime:'image/png',bytes:photoBytes.slice()}:{mime:'application/pdf',bytes:bytes.slice()};
     if(op==='webChatSync'&&input.id==='history-chat'){
      if(!data.attachments.some(item=>item.id==='history-pdf'))data.attachments.push({...file,id:'history-pdf',message_id:'history-message',customer_id:input.id,name:'history.pdf',mime:'',status:'Available to download'});
