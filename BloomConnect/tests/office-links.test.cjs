@@ -23,7 +23,8 @@ test('Office conversion accepts web hyperlinks and rejects links to external doc
    const rels='<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" TargetMode="External" Type="'+relation+kind+'" Target="'+target+'"/></Relationships>';
    await writeFile(input,zipSync({[part]:strToU8('<fixture/>'),'_rels/.rels':strToU8(rels)}));
    await writeFile(request,JSON.stringify({input,output:join(folder,'output.pdf'),mode:'pages'}));
-   const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve('packages/printing/office.ps1'),'-InputFile',request,'-ValidateOnly'],{encoding:'utf8',timeout:15_000,windowsHide:true});
+   const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve('packages/printing/office.ps1'),'-InputFile',request,'-ValidateOnly'],{encoding:'utf8',timeout:60_000,windowsHide:true});
+   assert.ifError(result.error);
    if(ok)assert.equal(result.status,0,result.stderr);
    else{assert.notEqual(result.status,0);assert.match(result.stderr,/references linked files or data/)}
   }
