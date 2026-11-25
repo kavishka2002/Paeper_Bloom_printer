@@ -82,7 +82,13 @@ class Client extends EventEmitter{
   this.timer=setInterval(()=>{
    if(!existsSync(join(root,'release-qr')))return;
    clearInterval(this.timer);
-   if(!nativeLogin&&process.env.BLOOMCONNECT_TEST_WEB_COMPAT_INJECT_ERROR!=='1')this.markReady();
+   if(!nativeLogin&&process.env.BLOOMCONNECT_TEST_WEB_COMPAT_INJECT_ERROR!=='1'){
+    this.markReady();
+    if(process.env.BLOOMCONNECT_TEST_RECENT_INBOUND==='1'&&this.index>1){
+     this.emit('authenticated');
+     this.emit('ready');
+    }
+   }
   },25);
  }
  async inject(){

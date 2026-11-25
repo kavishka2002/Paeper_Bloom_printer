@@ -196,7 +196,7 @@ export class WebAdapter {
         reportFailure(error);
       }finally{this.authStateInFlight=false}
     };
-    this.authStatePoll=setInterval(()=>{void poll().catch(reportFailure)},1000);
+    this.authStatePoll=setInterval(()=>{void poll().catch(reportFailure)},500);
     void poll().catch(reportFailure);
   }
   private watchStartup(){
@@ -251,7 +251,7 @@ export class WebAdapter {
       };
     };
     client.on('qr',raw=>{
-      if(this.stopped)return;
+      if(this.stopped||this.ready||this.authenticated)return;
       if(typeof raw!=='string'||raw.length===0){
         this.callbacks.offline('WhatsApp supplied an empty QR payload. Restart WhatsApp Engine and try again.');
         return;
@@ -302,7 +302,8 @@ export class WebAdapter {
   private attachClientEvents(client:Client){
     const callbacks=this.callbacks;
     client.on('authenticated',()=>{
-      if(this.stopped)return;
+      // WhatsApp Web can emit an extra sync/authenticated event after ready.
+      if(this.stopped||this.ready||this.authenticated)return;
       this.stopQrTimers();
       this.stopAuthStateWatch();
       this.watchStartup();
@@ -593,9 +594,11 @@ export class WebAdapter {
         imported++;
         return;
       }
-      const contact=await historyWithin(chat.getContact(),3_000).catch(()=>undefined);
+      const [contact,{messages:history,partial}]=await Promise.all([
+        historyWithin(chat.getContact(),3_000).catch(()=>undefined),
+        this.fetchHistory(chat,20)
+      ]);
       const identity=await this.identity(chat.id._serialized,contact,chat.name);
-      const {messages:history,partial}=await this.fetchHistory(chat,20);
       if(partial)failed++;
       const messages=history.flatMap(message=>{
         const normalized=this.normalize(message,identity,true);

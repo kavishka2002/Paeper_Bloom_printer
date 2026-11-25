@@ -129,8 +129,10 @@ export function InboxView(){
  },[active?.id,newest]);
  const connected=webConnected||data.connection.status==="API reachable";
  return <div className="stack whatsapp-inbox" data-connected={connected}>
- {!connected&&<div className="connection"><div><strong>WhatsApp · {data.connection.status}</strong>{data.connection.detail&&<p>{data.connection.detail}</p>}{!webConnected&&!data.connection.detail&&data.connection.status!=='API reachable'&&<p>Connect WhatsApp to load chats and documents.</p>}</div>
- {!webConnected&&data.connection.status!=='API reachable'&&<Button className="secondary" onClick={()=>state.set({view:'Automation Engine'})}>Open connection settings</Button>}</div>}
+ {!connected&&<div className="connection inbox-connection">
+  <div role="status"><strong>WhatsApp · {data.connection.status}</strong>{data.connection.detail&&<small>{data.connection.detail}</small>}</div>
+  <Button className="secondary" onClick={()=>state.set({view:'Automation Engine'})}>Connection settings</Button>
+ </div>}
  <div className="inbox-layout panel">
  <aside className="conversation-list"><div className="padded stack"><h2>Conversations</h2>{data.connection.mode==="web"&&data.connection.status==="Connected"&&<><Button className="secondary" disabled={data.connection.sync?.startsWith("Syncing")} onClick={()=>void run("webSync",null)}>Sync recent chats</Button>{data.connection.sync&&<p className="subtle" role="status">{data.connection.sync}</p>}</>}<input aria-label="Find a conversation" placeholder="Find a conversation" value={query} onChange={e=>setQuery(e.target.value)}/><label className="check"><input type="checkbox" checked={unread} onChange={e=>setUnread(e.target.checked)}/> Unread only</label></div>
  {conversations.map(({c,list})=><button key={c.id} className={'conversation '+(active?.id===c.id?'selected':'')} onClick={()=>{state.set({customer:c.id});setDraft('');setSelectedFiles([]);setPreviewFileId('')}}><span className="avatar">{c.name[0]}</span><span><strong>{c.name}</strong><small>{c.phone}</small><small>{list.at(-1)?.body||list.at(-1)?.kind}</small><small>{stamp(list.at(-1)?.created??c.last)}</small></span>{list.some(unreadInboxMessage)&&<i className="unread unread-count" aria-label={list.filter(unreadInboxMessage).length+" unread"}>{list.filter(unreadInboxMessage).length}</i>}</button>)}

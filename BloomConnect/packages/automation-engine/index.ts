@@ -76,7 +76,15 @@ store.atomic(()=>{
 });
 const interrupted=run("UPDATE print_queue SET status='Unconfirmed',error='BloomConnect restarted before submission was confirmed. Check the printer output before retrying.' WHERE status='Printing'");
 if(interrupted.changes)store.audit('Printer recovery','Interrupted submissions require operator verification.');
-const changed=()=>{if(process.connected)process.send?.({type:'changed'},()=>{})};
+let changeTimer:ReturnType<typeof setTimeout>|undefined;
+const changed=()=>{
+  if(changeTimer||!process.connected)return;
+  changeTimer=setTimeout(()=>{
+    changeTimer=undefined;
+    if(process.connected)process.send?.({type:'changed'},()=>{});
+  },45);
+  changeTimer.unref();
+};
 let adapter:CloudAdapter|undefined;
 let web:WebAdapter|undefined;
 let stoppingWeb:WebAdapter|undefined;
@@ -92,7 +100,7 @@ if(store.setting('whatsappProvider')==='web'&&!row('SELECT key FROM settings WHE
 }
 function retryWeb(){
   if(shuttingDown||webRetry||store.setting('whatsappProvider')!=='web')return;
-  const delay=Math.min(5000*2**webRetryAttempt,30000);
+  const delay=[1200,5000,10000,30000][webRetryAttempt];
   webRetryAttempt=Math.min(webRetryAttempt+1,3);
   connection={...connection,status:'Reconnecting',detail:'WhatsApp will reconnect automatically. Saved chats are still available.'};
   changed();
@@ -124,6 +132,7 @@ function visibleMessageAccount(){
  const savedWebAccount=store.setting('whatsappProvider')==='web'?store.setting<string>('lastWebAccount'):null;
  return web?.account||adapter?.config.phoneId||savedWebAccount;
 }
+const automationRules=()=>rows<{data:string}>('SELECT data FROM automation_rules ORDER BY rowid').map(r=>JSON.parse(r.data) as Rule);
 function snapshot():Snapshot{
  const activeAccount=visibleMessageAccount();
  return {
@@ -134,7 +143,7 @@ function snapshot():Snapshot{
   attachments:rows('SELECT '+attachmentFields+' FROM attachments ORDER BY created DESC'),
   jobs:rows<Job>(jobQuery+' ORDER BY j.id DESC').map(j=>({...j,files:printFiles(j.id),printSettings:JSON.parse(row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',j.id)?.settings??'null')??undefined,calculations:rows<{attachment_id:string;input:string;result:string}>('SELECT * FROM print_calculations WHERE job_id=?',j.id).map(c=>({id:c.attachment_id,settings:JSON.parse(c.input),result:JSON.parse(c.result)}))})),
   payments:rows('SELECT * FROM payments ORDER BY created DESC'),queue:rows('SELECT * FROM print_queue ORDER BY created DESC'),
-  rules:rows<{data:string}>('SELECT data FROM automation_rules ORDER BY rowid').map(r=>JSON.parse(r.data) as Rule),
+  rules:automationRules(),
   activity:rows('SELECT * FROM activity_logs ORDER BY id DESC LIMIT 300'),connection
  }
 }
@@ -288,7 +297,7 @@ function matches(rule:Rule,event:Event){
   return rule.enabled&&(rule.trigger===event.kind||(rule.trigger==='keyword'&&event.kind==='message'&&!!rule.keyword&&event.text?.toLowerCase().includes(rule.keyword.toLowerCase())));
 }
 async function automation(event:Event){
-  const rules=snapshot().rules;
+  const rules=automationRules();
   const matching=rules.filter(rule=>matches(rule,event));
   const customPickup=event.kind==='pickup'&&matching.some(rule=>rule.id!=='default-pickup'&&rule.actions.includes('reply'));
   const pickupReply=event.kind==='print-completed'&&rules.some(rule=>rule.enabled&&rule.trigger==='pickup'&&rule.actions.includes('reply'));
@@ -497,7 +506,7 @@ async function connectWeb(_input:null=null,automatic=false){
         }
       },
       authenticated(){
-        if(web===next){
+        if(web===next&&connection.status!=='Connected'){
           connection={...connection,status:'Authenticating',qr:undefined,qrClientId:undefined,qrGeneratedAt:undefined,detail:undefined};
           changed();
         }
@@ -627,7 +636,8 @@ async function deliverNotifications(){
  try{for(const item of rows<{id:string;rule_id:string;customer_id:string;account_id:string;body:string;event_key:string}>("SELECT * FROM notification_outbox WHERE account_id=? AND status='Pending' AND due<=? ORDER BY due,rowid LIMIT 10",account,Date.now())){
   if(shuttingDown||connectedWhatsAppAccount()!==account)break;
   touched=true;const [event,jobId]=item.event_key.split(':');if(['pickup','print-completed'].includes(event)&&!allFilesConfirmed(jobId)){run("UPDATE notification_outbox SET status='Cancelled',error='Order files are not all confirmed printed' WHERE id=?",item.id);continue}
-  const rule=snapshot().rules.find(r=>r.id===item.rule_id);
+  const storedRule=row<{data:string}>('SELECT data FROM automation_rules WHERE id=?',item.rule_id);
+  const rule=storedRule?JSON.parse(storedRule.data) as Rule:undefined;
   if(!rule?.enabled){run("UPDATE notification_outbox SET status='Cancelled',error='Rule disabled' WHERE id=?",item.id);continue}
   await sendNotification(item).catch(e=>store.audit('Automation reply issue',e instanceof Error?e.message:String(e)));
 
@@ -839,7 +849,7 @@ const handlers:HandlerMap={
     if(rule.actions.includes('order')&&!['pdf','image','document'].includes(rule.trigger))throw new Error('Create order requires a file trigger.');
     if(rule.actions.some(a=>a==='label'||a==='reply')&&!rule.text.trim())throw new Error('Enter the label or reply text.');
     run('INSERT INTO automation_rules VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',rule.id,JSON.stringify(rule));store.audit('Rule saved',rule.name)},
-  testRule({id}){const r=snapshot().rules.find(x=>x.id===id);if(!r)throw new Error('Save the rule first.');const event={id:'local',kind:r.trigger==='keyword'?'message':r.trigger,customer:null,text:r.keyword};const matched=matches({...r,enabled:true},event);store.audit('Workflow test',r.name+' · '+(matched?r.actions.join(', ')+' matched (dry run)':'no match'))}
+  testRule({id}){const r=automationRules().find(x=>x.id===id);if(!r)throw new Error('Save the rule first.');const event={id:'local',kind:r.trigger==='keyword'?'message':r.trigger,customer:null,text:r.keyword};const matched=matches({...r,enabled:true},event);store.audit('Workflow test',r.name+' · '+(matched?r.actions.join(', ')+' matched (dry run)':'no match'))}
 };
 function readyFile(id:string){const a=row<Attachment&{path:string}>("SELECT * FROM attachments WHERE id=? AND status='Ready'",id);if(!a||!a.path)throw new Error('The file is not available.');return a}
 const internal:Record<string,(input:never)=>unknown>={
