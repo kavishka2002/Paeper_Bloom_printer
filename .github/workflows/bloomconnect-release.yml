@@ -37,7 +37,21 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - name: Run automated tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          npm test | Tee-Object -FilePath "$env:RUNNER_TEMP/bloomconnect-tests.tap"
+          $result = $LASTEXITCODE
+          if ($result -ne 0) {
+            Select-String -Path "$env:RUNNER_TEMP/bloomconnect-tests.tap" -Pattern '^not ok' -Context 0,12 |
+              ForEach-Object {
+                $details = @($_.Line) + $_.Context.PostContext
+                $message = ($details -join "`n").Replace('%', '%25').Replace("`n", '%0A')
+                Write-Output "::error::$message"
+              }
+            exit $result
+          }
       - run: npx --no-install electron-builder --win nsis --x64 --publish never
 
       - name: Verify update assets
