@@ -7,15 +7,16 @@ $settings=[System.Drawing.Printing.PrinterSettings]::new()
 $settings.PrinterName=[string]$request.printer
 if(-not $settings.IsValid){throw 'This Windows printer is unavailable.'}
 $page=$settings.DefaultPageSettings
-$papers=@($settings.PaperSizes | ForEach-Object { [pscustomobject]@{id=$_.RawKind;name=$_.PaperName;widthMm=[Math]::Round($_.Width*0.254,3);heightMm=[Math]::Round($_.Height*0.254,3)} })
+$paperSizes=$settings.PaperSizes
 if($request.widthMm -and $request.heightMm){
-  $match=$settings.PaperSizes | Where-Object { [Math]::Abs($_.Width*0.254-$request.widthMm) -lt 1.1 -and [Math]::Abs($_.Height*0.254-$request.heightMm) -lt 1.1 } | Select-Object -First 1
+  $match=$paperSizes | Where-Object { [Math]::Abs($_.Width*0.254-$request.widthMm) -lt 1.1 -and [Math]::Abs($_.Height*0.254-$request.heightMm) -lt 1.1 } | Select-Object -First 1
   if($match){$page.PaperSize=$match}
   elseif($request.allowCustom){$page.PaperSize=[System.Drawing.Printing.PaperSize]::new('BloomConnect custom',[int][Math]::Round($request.widthMm/0.254),[int][Math]::Round($request.heightMm/0.254))}
   elseif($Action -eq 'submit'){throw 'The Windows driver does not advertise the requested paper size.'}
 }
 $page.Landscape=[bool]$request.landscape
 if($Action -eq 'capabilities'){
+  $papers=@($paperSizes | ForEach-Object { [pscustomobject]@{id=$_.RawKind;name=$_.PaperName;widthMm=[Math]::Round($_.Width*0.254,3);heightMm=[Math]::Round($_.Height*0.254,3)} })
   $printerName=$settings.PrinterName.Replace('\','\\').Replace("'","\'")
   # Driver capabilities remain usable when Windows does not expose WMI status.
   $device=$null

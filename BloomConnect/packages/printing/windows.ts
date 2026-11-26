@@ -35,9 +35,30 @@ export async function windowsBridge(script:string,action:'capabilities'|'submit'
     return JSON.parse(output.replace(/^\uFEFF/,''));
   }finally{await rm(folder,{recursive:true,force:true})}
 }
-export async function queryCapabilities(script:string,printer:string,s?:PrintSettings){
+const capabilityReuseMs=30_000;
+const capabilityQueries=new Map<string,{result:Promise<PrinterCapabilities>;completedAt?:number}>();
+export function queryCapabilities(script:string,printer:string,s?:PrintSettings,reuseRecent=false){
   const dimensions=s?paperDimensions(s.paper,s.customPaper):undefined;
-  return capabilitiesSchema.parse(await windowsBridge(script,'capabilities',{printer,widthMm:dimensions?.[0],heightMm:dimensions?.[1],landscape:s?.landscape??false,allowCustom:false}));
+  const request={printer,widthMm:dimensions?.[0],heightMm:dimensions?.[1],landscape:s?.landscape??false,allowCustom:false};
+  const key=JSON.stringify([script,request]);
+  const previous=capabilityQueries.get(key);
+  if(previous&&(previous.completedAt===undefined||
+    (reuseRecent&&performance.now()-previous.completedAt<capabilityReuseMs)))return previous.result;
+
+  const entry:{result:Promise<PrinterCapabilities>;completedAt?:number}={
+    result:windowsBridge(script,'capabilities',request).then(output=>capabilitiesSchema.parse(output))
+  };
+  capabilityQueries.delete(key);
+  capabilityQueries.set(key,entry);
+  if(capabilityQueries.size>32){
+    for(const oldest of capabilityQueries.keys()){capabilityQueries.delete(oldest);break}
+  }
+  const discard=()=>{if(capabilityQueries.get(key)===entry)capabilityQueries.delete(key)};
+  void entry.result.then(capabilities=>{
+    if(capabilities.offline||capabilities.status===7||capabilities.error>2)discard();
+    else entry.completedAt=performance.now();
+  },discard);
+  return entry.result;
 }
 export {validatePrinter} from './capabilities';
 export function openPrinterDialog(printer:string,kind:'preferences'|'properties'){

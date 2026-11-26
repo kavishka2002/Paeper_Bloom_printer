@@ -1,7 +1,7 @@
 {
   "name": "bloomconnect",
   "productName": "BloomConnect",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "WhatsApp Automation & Print Management",
   "author": "BloomConnect",
   "main": "dist/main.cjs",

@@ -101,7 +101,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  const [quote,setQuote]=useState(''),[quoteReason,setQuoteReason]=useState(''),[file,setFile]=useState(''),[copies,setCopies]=useState(1);
  const [matchPdfPaper,setMatchPdfPaper]=useState(false);
  const [manualPaper,setPaper]=useState<Input<'print'>['paper']>('A4'),[colour,setColour]=useState(false),[range,setRange]=useState('');
- const [selectedPrinter,setPrinter]=useState(data.settings?.printer||localStorage.getItem('lastDocumentPrinter')||''),[landscape,setLandscape]=useState(false),[duplex,setDuplex]=useState<Input<'print'>['duplex']>('simplex');
+ const [selectedPrinter,setPrinter]=useState(data.settings?.printer||localStorage.getItem('lastDocumentPrinter')||''),[landscape,setLandscape]=useState(false),[selectedDuplex,setDuplex]=useState<Input<'print'>['duplex']>();
  const [rotation,setRotation]=useState(0),[fit,setFit]=useState<Input<'print'>['fit']>('contain'),[layout,setLayout]=useState<Input<'print'>['layout']>('single');
  const [nup,setNup]=useState<NonNullable<Input<'print'>['nup']>>(1),[booklet,setBooklet]=useState(false),[binding,setBinding]=useState<'left'|'right'>('left');
  const [marginMm,setMargin]=useState(0),[gapMm,setGap]=useState(0),[borders,setBorders]=useState(false);
@@ -113,6 +113,8 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  const docs=attachmentId?data.attachments.filter(a=>a.id===attachmentId):active?active.files.map(id=>data.attachments.find(a=>a.id===id)).filter((item):item is typeof data.attachments[number]=>!!item):data.attachments.filter(a=>a.status==='Ready');
  const preview=docs.find(a=>a.id===file)??(active||attachmentId?docs[0]:undefined);
  const files=active?docs:preview?[preview]:[];
+ const defaultDuplex=files.length>0&&files.every(item=>item.mime==='application/pdf')?'auto':'simplex';
+ const duplex=selectedDuplex??defaultDuplex;
  const fileKey=files.map(item=>item.id+':'+item.status).join('|');
  useEffect(()=>{
   let current=true;setCountError('');
@@ -135,7 +137,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   const saved=schemas.print.safeParse(parsed),options=saved.success?saved.data:active?.printSettings;
   setCopies(options?.copies??active?.copies??1);setPaper(options?.paper??(Object.hasOwn(paperSizes,active?.paper??'')?active!.paper as Input<'print'>['paper']:'A4'));
   setColour(options?.colour??!!active?.colour);setRange(options?.range??'');setFile('');setQuote(active?String(active.total/100):'');
-  setPrinter(options?.printer??(data.settings!.printer||localStorage.getItem('lastDocumentPrinter')||''));setLandscape(options?.landscape??false);setDuplex(options?.duplex??'simplex');
+  setPrinter(options?.printer??(data.settings!.printer||localStorage.getItem('lastDocumentPrinter')||''));setLandscape(options?.landscape??false);setDuplex(options?.duplex);
   setRotation(options?.rotation??0);setFit(options?.fit??'contain');setLayout(options?.layout??'single');
   setAdvanced(options??{});setNup(options?.nup??1);setBooklet(options?.booklet??false);setBinding(options?.binding??'left');setMargin(options?.marginMm??0);setGap(options?.gapMm??0);setBorders(options?.borders??false);
   const priorBasis=active?.calculations?.[0]?.result.pricing?.basis;
@@ -254,7 +256,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   settingsTouched.current=true;
   setAdvanced({});setMatchPdfPaper(false);setRotation(0);
   setBasis('sheet');setDiscount(0);setCharge(0);
-  applySettings({...normalizedSettings({printer,paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'}),...preset?.settings,printer:preset?.settings.printer||printer});
+  applySettings({...normalizedSettings({printer,paper:'A4',copies:1,colour:false,landscape:false,duplex:defaultDuplex,range:'',rotation:0,fit:'contain',layout:'single'}),...preset?.settings,printer:preset?.settings.printer||printer});
  }
  function selectPagesPerSide(value:number){
   settingsTouched.current=true;setNup(value);setBooklet(false);
@@ -317,7 +319,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  {booklet&&<small className="booklet-fold-preview"><BookOpen size={22}/> Fold each sheet in half after printing both sides.</small>}
  <div className="actions document-duplex-controls">
   <label>Orientation<select aria-label="Orientation" disabled={booklet} value={options.orientation} onChange={e=>{setLandscape(e.target.value==='landscape');setAdvanced(prior=>({...prior,orientation:e.target.value as typeof orientation}))}}><option value="portrait">Portrait</option><option value="landscape">Landscape</option><option value="auto" disabled={booklet||advanced.scaling==='printable'}>Auto by first selected page</option></select></label>
- <label>Double-Sided Printing<select aria-label="Double-Sided Printing" value={duplex} onChange={e=>setDuplex(e.target.value as typeof duplex)}><DuplexOptions allowOff={!booklet}/></select></label>
+ <label>Double-Sided Printing<select aria-label="Double-Sided Printing" value={duplex} onChange={e=>{settingsTouched.current=true;setDuplex(e.target.value as typeof duplex)}}><DuplexOptions allowOff={!booklet}/></select></label>
  </div>
 
  {preview?.mime==='application/pdf'&&<div className="actions document-duplex-controls">

@@ -176,16 +176,17 @@ async function printOrder(input:Input<'print'>,test=false){
   try{return await submitPrintOrder(input,test)}finally{activePrintOperations--}
 }
 async function submitPrintOrder(input:Input<'print'>,test=false){
-  const list=await main.webContents.getPrintersAsync();
-  if(!list.some(p=>p.name===input.printer))throw new Error('Select an available Windows printer.');
   const verified=normalizedSettings(input);
   if(isPdfPrinter(input.printer))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
   const [capabilities,files]=await Promise.all([
-    queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified).catch(error=>{
+    queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified,true).catch(error=>{
       if(!canPrintWithoutCapabilities({...verified,duplex:submissionDuplex(verified.duplex,isVirtualPrinter(input.printer))}))throw error;
       return undefined;
     }),
-    test?[]:selectedPrintFiles(input)
+    test?[]:selectedPrintFiles(input),
+    main.webContents.getPrintersAsync().then(printers=>{
+      if(!printers.some(printer=>printer.name===input.printer))throw new Error('Select an available Windows printer.');
+    })
   ]);
   if(isPdfPrinter(input.printer,capabilities?.driver))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
   const fileOutput=isFileOutputPrinter(capabilities?.port??'');

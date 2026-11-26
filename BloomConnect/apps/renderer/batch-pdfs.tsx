@@ -15,7 +15,7 @@ import {paperNames} from '../../packages/printing/paper';
 import {BookletWizard,DuplexOptions,DuplexTest,PrintEstimate} from './print-settings';
 import {isManualDuplex} from '../../packages/printing/duplex';
 
-const defaults:BatchPdfFile={paper:'A4',copies:1,nup:1,colour:false,landscape:false,duplex:'simplex',range:''};
+const defaults:BatchPdfFile={paper:'A4',copies:1,nup:1,colour:false,landscape:false,duplex:'auto',range:''};
 const settingsFor=(printer:string,file:BatchPdfFile)=>normalizedSettings({
  rotation:0,fit:'contain',layout:'single',...file,printer
 });
