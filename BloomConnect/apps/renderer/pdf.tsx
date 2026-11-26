@@ -445,7 +445,7 @@ export async function preparePrint(){
       const images=new Map<string,HTMLImageElement>();
       try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(!source)await renderPhotoSheet(plan,side,canvas,images);else await renderPlannedSide(source,item.info,plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{await source?.close()}
     }
-    Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour,sides:dimensions.length,renderDpi}});
+    Object.assign(window,{__printManifest:{widthMm:width,heightMm:height,faces,hasColour,sides:dimensions.length,renderDpi,requestedDpi:options.renderDpi}});
     window.printView.done('');
   }catch(error){window.printView.done(error instanceof Error?error.message:'Could not prepare print layout.')}
 }

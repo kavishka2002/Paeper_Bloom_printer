@@ -1,4 +1,4 @@
-﻿import {createHmac,randomBytes,timingSafeEqual} from 'node:crypto';
+import {createHmac,randomBytes,timingSafeEqual} from 'node:crypto';
 import {open,realpath} from 'node:fs/promises';
 import {basename,dirname,join} from 'node:path';
 import {Readable} from 'node:stream';
@@ -26,6 +26,16 @@ export async function issueReference(directory:string,name:string){
   }finally{await file.close()}
 }
 
+export function documentRange(header:string|null,size:number){
+  if(header===null)return {start:0,end:size-1,partial:false};
+  const requested=/^bytes=(\d+)-(\d*)$/.exec(header);
+  if(!requested)return;
+  const start=Number(requested[1]);
+  const end=requested[2]?Math.min(Number(requested[2]),size-1):size-1;
+  if(start>=size||end<start)return;
+  return {start,end,partial:true};
+}
+
 export async function serveReference(directory:string,request:Request){
   const url=new URL(request.url);
   const match=/^\/document\/([^/]+)\/([a-f0-9]{64})$/.exec(url.pathname);
@@ -40,18 +50,16 @@ export async function serveReference(directory:string,request:Request){
     const size=stat.size;
     const headers=new Headers({'Content-Type':types[name.split('.')[1]],'Cache-Control':'no-store',
       'X-Content-Type-Options':'nosniff','Accept-Ranges':'bytes'});
-    const range=request.headers.get('range');
-    const requested=range===null?null:/^bytes=(\d+)-(\d*)$/.exec(range);
-    const start=requested?Number(requested[1]):0;
-    const end=requested&&requested[2]?Math.min(Number(requested[2]),size-1):size-1;
-    if(range!==null&&(!requested||start>=size||end<start)){
+    const range=documentRange(request.headers.get('range'),size);
+    if(!range){
       headers.set('Content-Range','bytes */'+size);
       return new Response(null,{status:416,headers});
     }
-    if(requested)headers.set('Content-Range',`bytes ${start}-${end}/${size}`);
+    const {start,end,partial}=range;
+    if(partial)headers.set('Content-Range',`bytes ${start}-${end}/${size}`);
     headers.set('Content-Length',String(end-start+1));
     const stream=file.createReadStream({start,end,signal:request.signal});
-    const response=new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>,{status:requested?206:200,headers});
+    const response=new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>,{status:partial?206:200,headers});
     streaming=true;
     return response;
   }finally{if(!streaming)await file.close()}

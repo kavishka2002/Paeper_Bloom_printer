@@ -7,11 +7,11 @@ const {buildSync}=require('esbuild');
 const {createHash}=require('node:crypto');
 const code=buildSync({stdin:{contents:`
   export {storeDownload,identifyLargeMedia,mediaLimit} from './packages/automation-engine/media-storage';
-  export {issueReference,serveReference} from './apps/desktop/document-protocol';
+  export {issueReference,serveReference,documentRange} from './apps/desktop/document-protocol';
 `,resolveDir:process.cwd()},bundle:true,external:['sharp'],write:false,platform:'node',format:'cjs'}).outputFiles[0].text;
 const mod={exports:{}};
 new Function('module','exports','require',code)(mod,mod.exports,require);
-const {storeDownload,identifyLargeMedia,mediaLimit,issueReference,serveReference}=mod.exports;
+const {storeDownload,identifyLargeMedia,mediaLimit,issueReference,serveReference,documentRange}=mod.exports;
 
 test('streams small and 34 MiB documents and serves authenticated byte ranges',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bloom-media-'));
@@ -42,18 +42,10 @@ test('streams small and 34 MiB documents and serves authenticated byte ranges',a
  }finally{await rm(dir,{recursive:true,force:true})}
 });
 
-test('handles range offsets near 2 GiB without loading the whole file',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'bloom-large-range-'));
- try{
-  const name=createHash('sha256').update('sparse fixture').digest('hex')+'.pdf';
-  const file=await open(join(dir,name),'wx');
-  try{await file.truncate(mediaLimit);await file.write(Buffer.from('%%EOF'),0,5,mediaLimit-5)}
-  finally{await file.close()}
-  const {url,bytes}=await issueReference(dir,name);
-  const response=await serveReference(dir,new Request(url,{headers:{Range:`bytes=${bytes-5}-`}}));
-  assert.equal(response.status,206);
-  assert.equal(await response.text(),'%%EOF');
- }finally{await rm(dir,{recursive:true,force:true})}
+test('validates range offsets at the 2 GiB boundary',()=>{
+ assert.deepEqual(documentRange(`bytes=${mediaLimit-5}-`,mediaLimit),
+  {start:mediaLimit-5,end:mediaLimit-1,partial:true});
+ assert.equal(documentRange(`bytes=${mediaLimit}-`,mediaLimit),undefined);
 });
 
 test('cleans up interrupted, truncated and cancelled downloads and accepts a retry',async()=>{

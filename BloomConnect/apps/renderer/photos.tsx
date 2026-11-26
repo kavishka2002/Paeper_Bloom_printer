@@ -1,3 +1,4 @@
+import {SkipAutoMessages} from './print-settings';
 import {DuplexOptions} from './print-settings';
 import {isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning} from '../../packages/printing/capabilities';
 import {useQueryClient} from '@tanstack/react-query';
@@ -15,6 +16,7 @@ import {DocumentPreview,DocumentThumbnail,ImposedPreview,inspectDocument} from '
 import {cellBox,constrainPhotoFrame,contentBox,photoPlacementGeometry,planPhotos,reorderPhotoFrames,tightPhotoFrame,type DocumentInfo} from '../../packages/printing/plan';
 import {effectiveDpi} from '../../packages/printing/image-processing';
 import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
+import {PhotoCropEditor,type PhotoCrop} from './photo-crop-editor';
 const sizes:Record<string,[number,number]>={'Passport (35 × 45 mm)':[35,45],'ID (25 × 35 mm)':[25,35],'1 × 1 inch':[25.4,25.4],'2 × 2 inch':[50.8,50.8],'3 × 4 inch':[76.2,101.6],'4 × 6 inch':[101.6,152.4],'5 × 7 inch':[127,177.8],'6 × 8 inch':[152.4,203.2],'8 × 10 inch':[203.2,254],A6:[105,148],A5:[148,210],A4:[210,297],A3:[297,420]};
 const photoCounts=Array.from({length:64},(_,index)=>index+1);
 const defaultLightening=55;
@@ -79,6 +81,7 @@ function PhotoFilterFields({filters,change,bulk=false}:{filters:PhotoFilters;cha
 const grids:[string,number,number][]=[['Full page',1,1],['Half page',2,1],['One-third page',3,1],['Quarter page',2,2],['One-sixth page',3,2],['One-eighth page',4,2],['9-up',3,3],['12-up',4,3],['16-up',4,4]];
 export function PhotoStudio({onBack}:{onBack:()=>void}){
  const [reviewPhoto,setReviewPhoto]=useState('');
+ const [cropPhoto,setCropPhoto]=useState('');
  const [reviewOriginal,setReviewOriginal]=useState(false);
  const {data,run,refresh,error,printers}=useData(),state=useWorkspace(),active=data.jobs.find(j=>j.id===state.job);
  const queryClient=useQueryClient();
@@ -128,6 +131,9 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  const pdfKey=extraPdfs.join('|');useEffect(()=>{let current=true;setPdfPages({});void (async()=>{const result:Record<string,number>={};for(const id of extraPdfs)result[id]=(await inspectDocument(id)).pages.length;if(current)setPdfPages(result)})().catch(error);return()=>{current=false}},[pdfKey]);
  const key=JSON.stringify([...selected].sort());
  useEffect(()=>{let current=true;setInfos([]);setFailure('');setFilterNotice('');void (async()=>{const values=[];for(const id of selected)values.push(await inspectDocument(id));if(current)setInfos(values)})().catch(e=>{if(current)setFailure(e.message)});return()=>{current=false}},[key]);
+ const [skipAutoMessages,setSkipAutoMessages]=useState(false);
+ const messageCustomer=active?active.customer_id:customer==='walk-in'?null:customer;
+ useEffect(()=>setSkipAutoMessages(active?.skipAutoMessages??false),[messageCustomer,active?.id,active?.skipAutoMessages]);
  const defaultItem=():Item=>({widthMm:size==='Custom'?customWidth*(unit==='in'?25.4:unit==='cm'?10:1):sizes[size][0],heightMm:size==='Custom'?customHeight*(unit==='in'?25.4:unit==='cm'?10:1):sizes[size][1],quantity,rotation:0,fit,ink});
  const photoItems=Object.fromEntries(selected.map(id=>{
   const item=items[id]??defaultItem(),source=infos.find(info=>info.id===id)?.pages[0];
@@ -162,7 +168,12 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   :Object.values(photoItems).map(item=>photoSizeKey(item.widthMm,item.heightMm)))];
  const sheets=photoQuote?.physicalSheets??0,photoTotal=photoQuote?.total??0,pdfTotal=pdfCalculation?.finalTotal??0;
  const subtotal=photoTotal+pdfTotal,total=subtotal+adjustments.charge-adjustments.discount;
- if(!Number.isSafeInteger(total)||total<0||adjustments.charge<0||adjustments.discount<0)problem='Check the additional charge and discount.';
+ const previousAdjustments=active?.printSettings?.photoAdjustments;
+ const adjustmentChange=adjustments.charge-(previousAdjustments?.charge??0)-adjustments.discount+(previousAdjustments?.discount??0);
+ const adjustmentsEdited=!!active&&(adjustments.charge!==(previousAdjustments?.charge??0)||adjustments.discount!==(previousAdjustments?.discount??0));
+ const orderTotal=active&&!selected.some(id=>!active.files.includes(id))?active.total+adjustmentChange:total;
+ if(!Number.isSafeInteger(total)||total<0||orderTotal<(active?.paid??0)||orderTotal>100000000||
+  [adjustments.charge,adjustments.discount].some(value=>!Number.isSafeInteger(value)||value<0||value>100000000))problem='Check the additional charge and discount.';
  const resolutions=new Map<string,number>();
  if(plan)for(const side of plan.sides)for(const placement of side.placements){
   const source=infos.find(info=>info.id===placement.file)?.pages[0];
@@ -406,9 +417,23 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   if(delta)setPositions(current=>current.map(position=>position.file===id&&position.frame?{...position,frame:{...position.frame,rotation:(position.frame.rotation+delta+360)%360}}:position));
  }
  setItems(prior=>({...prior,[id]:{...(prior[id]??defaultItem()),...value}}))}
+ const cropLimit=41-new Set([...(active?.files??[]),...selected,...extraPdfs]).size;
+ async function applyPhotoCrops(id:string,crops:PhotoCrop[]){
+  if(crops.length>cropLimit)throw new Error('An order supports up to 40 files.');
+  const [first,...rest]=crops;
+  const crop=first.width===1&&first.height===1?undefined:first;
+  const item={...photoItems[id],crop,fit:'contain' as const,zoom:1};
+  const copies=rest.length?await window.bloom.call('createPhotoCrops',{id,crops:rest}):[];
+  setItems(prior=>({...prior,[id]:item,...Object.fromEntries(copies.map(copy=>[copy,{...item,crop:undefined,quantity:1}]))}));
+  if(copies.length){
+   if(!grid&&arrangement==='manual'){setArrangement('auto');setPositions([]);setPast([]);setFuture([])}
+   setSelected(current=>current.flatMap(file=>file===id?[id,...copies]:[file]));
+   await refresh();
+  }
+ }
  async function createOrder(){
   const owner=data.attachments.find(a=>a.id===selected[0])!.customer_id;
-  const id=await window.bloom.call('order',{customer:owner,files:[...selected,...extraPdfs],copies:1,paper,colour:outputColour,price:subtotal,discount:adjustments.discount,charge:adjustments.charge,printSettings:normalizedSettings(options)});
+  const id=await window.bloom.call('order',{customer:owner,files:[...selected,...extraPdfs],copies:1,paper,colour:outputColour,price:subtotal,discount:adjustments.discount,charge:adjustments.charge,printSettings:normalizedSettings(options),skipAutoMessages});
   createdOrder.current=id;
   await refresh();
   state.set({job:id});
@@ -418,12 +443,13 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   if(exportBlocked||!completeSelection)return;
   setBusy(true);
   try{
-   if(active)await run('updatePhotoOrder',{id:active.id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total,reason:'Saved photo layout and settings'},'Photo order settings saved');
+   if(active)await run('updatePhotoOrder',{id:active.id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total:adjustmentsEdited?orderTotal:total,reason:'Saved photo layout and settings'},'Photo order settings saved');
    else await createOrder();
   }catch(e){error(e)}finally{setBusy(false)}
  }
  const addedPhotos=!!active&&selected.some(id=>!active.files.includes(id));
  const completeSelection=!active||active.files.every(id=>selected.includes(id)||extraPdfs.includes(id));
+ if(adjustmentsEdited&&!completeSelection)problem='Select all order files to update the charge or discount.';
  const exportBlocked=!plan||!!problem||!pdfReady||!pricingReady||busy||(addedPhotos&&!completeSelection);
  const printBlocked=exportPrinter||exportBlocked||!!printerProblem;
  const alreadyQueued=new Set<string>();
@@ -439,17 +465,20 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   setBusy(true);
   try{
    const id=active?.id??await createOrder();
-   if(addedPhotos&&!await run('updatePhotoOrder',{id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total,reason:'Added the selected customer photos'},'Selected photos added to the order'))return;
+   if(active&&(addedPhotos||adjustmentsEdited)&&!await run('updatePhotoOrder',{
+    id,files:[...selected,...extraPdfs],printSettings:normalizedSettings(options),total:orderTotal,
+    reason:addedPhotos?'Added the selected customer photos':'Updated photo order charges'
+   },'Photo order updated'))return;
    if(operation==='print'){
     if(photosToPrint.length){
-     if(!await run('print',{id,...photoOutput,fileSelection:photosToPrint},'Photo print job submitted to '+printer+'. Check Print Queue for status.'))return;
+     if(!await run('print',{id,...photoOutput,fileSelection:photosToPrint,skipAutoMessages},'Photo print job submitted to '+printer+'. Check Print Queue for status.'))return;
      localStorage.setItem('lastPhotoPrinter',printer);
     }
    }
    else if(!await run('savePrintPdf',{id,...photoOutput},'Photo sheets saved as a PDF.'))return;
    if(includePdfs&&pdfsToPrint.length){
     const pdfOperation=isPdfPrinter(pdfOutput.printer)?'savePrintPdf':'print';
-    await run(pdfOperation,{id,...pdfOutput,fileSelection:pdfsToPrint},pdfOperation==='print'?'PDFs sent under the same order.':'Prepared PDF document layout saved');
+    await run(pdfOperation,{id,...pdfOutput,fileSelection:pdfsToPrint,...(pdfOperation==='print'&&{skipAutoMessages})},pdfOperation==='print'?'PDFs sent under the same order.':'Prepared PDF document layout saved');
    }
   }catch(e){error(e)}finally{submitting.current=false;setBusy(false)}
  }
@@ -475,6 +504,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  else if(!exportPrinter&&printerProblem)printHint=printerProblem+(capabilities&&!capabilities.colour&&outputColour?' Select Black & white.':'');
  else if(!exportPrinter&&!photosToPrint.length&&!pdfsToPrint.length)printHint='The selected files have already been submitted.';
  const printButton=<div className="stack photo-print-action">
+  {!exportPrinter&&messageCustomer&&<SkipAutoMessages value={skipAutoMessages} change={setSkipAutoMessages} disabled={busy}/>}
   <div className="actions"><PrinterPropertiesButton printer={printer} disabled={busy} onClose={()=>setCapabilityAttempt(attempt=>attempt+1)}/>
   <Button disabled={exportPrinter?exportBlocked:printBlocked||!photosToPrint.length&&!pdfsToPrint.length} aria-busy={busy}
    onClick={()=>void submitPhotos(exportPrinter?'savePrintPdf':'print',true)}><Printer size={16}/> {busy?'Working...':exportPrinter?'Save PDF':'Print Now'}</Button></div>
@@ -514,6 +544,10 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   <Button className={exportPrinter?'':'secondary'} disabled={exportBlocked} onClick={()=>void submitPhotos('savePrintPdf')}>Save photo sheets as PDF</Button>
   <Button className="secondary" disabled={exportBlocked||!completeSelection} onClick={()=>void saveOrder()}>Save photo order</Button>
  </>;
+ const chargeFields=<div className="form-grid photo-charge-fields">
+  <label>Additional charge (LKR)<input type="number" min="0" max="1000000" step=".01" disabled={busy} value={charge} onChange={e=>setCharge(Number(e.target.value))}/></label>
+  <label>Discount (LKR)<input type="number" min="0" max="1000000" step=".01" disabled={busy} value={discount} onChange={e=>setDiscount(Number(e.target.value))}/></label>
+ </div>;
  return <div className="studio-workspace photo-studio-workspace"
  onDragOver={e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy'}}}
  onDrop={async e=>{
@@ -642,12 +676,22 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
       <button aria-label={'Preview '+label} onClick={()=>{setReviewPhoto(id);setReviewOriginal(false)}}>
        <DocumentThumbnail id={id}/><span>{label}</span>
       </button>
+      <label>Copies<input aria-label={'Copies of '+label} type="number" min={1} max={100} disabled={busy} value={photoItems[id].quantity||''} onChange={e=>{
+       const quantity=e.target.valueAsNumber;
+       update(id,{quantity:Number.isInteger(quantity)?quantity:0});
+      }}/></label>
+      <label>Size<select aria-label={'Size of '+label} disabled={busy} value="" onChange={e=>setIndividualPhotoSize(id,e.target.value)}>
+       <option value="">{grid?'Fit to A4 layout':`${photoItems[id].widthMm} ? ${photoItems[id].heightMm} mm`}</option>
+       {Object.keys(sizes).filter(preset=>preset!=='A4'&&preset!=='A3').map(preset=><option key={preset}>{preset}</option>)}
+      </select></label>
       <Button className="secondary" disabled={busy} aria-label={'Lighten '+label} aria-pressed={!!photoItems[id].documentLightening} onClick={()=>{
        const enabled=!!photoItems[id].documentLightening;
        update(id,{documentLightening:enabled?0:defaultLightening});
        setFilterNotice(enabled?'Lightening removed from '+label+'.':'Document paper lightened for '+label+'.');
       }}>{photoItems[id].documentLightening?'Undo lighten':'Lighten'}</Button>
       <Button className="quiet" disabled={busy} aria-label={'Remove '+label+' from selection'} onClick={()=>removePhoto(id)}>Remove</Button>
+      <Button className="secondary" disabled={busy} aria-label={'Edit photo '+label} onClick={()=>setCropPhoto(id)}><Pencil size={14}/> Edit photo</Button>
+      {photoItems[id].crop&&<small>Cropped</small>}
       <div className="actions photo-order-quick">
        <Button className="quiet" disabled={busy||index===0} aria-label={'Move '+label+' earlier'} onClick={()=>movePhoto(index,index-1)}><ArrowUp size={14}/></Button>
        <Button className="quiet" disabled={busy||index===selected.length-1} aria-label={'Move '+label+' later'} onClick={()=>movePhoto(index,index+1)}><ArrowDown size={14}/></Button>
@@ -658,7 +702,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   </section>}
   {selected.length>0&&relatedPdfs.length>0&&<details><summary>Include customer PDFs {extraPdfs.length>0?'('+extraPdfs.length+')':''}</summary><div className="stack">{pdfChoices}<small>Photos and PDFs are billed together. Each uses its own print settings.</small></div></details>}
   <div className="photo-print-footer">
-   <div><small>{printer||'No printer selected'}</small>{plan&&<strong>{active?'Order total':'Estimated price'} {money(active?.total??total)}</strong>}</div>
+   <div><small>{printer||'No printer selected'}</small>{plan&&<strong>{active?'Order total':'Estimated price'} {money(orderTotal)}</strong>}</div>
    <div className="photo-print-confirmation">
     {exportPrinter&&<small>Microsoft Print to PDF saves a PDF file.</small>}
     {virtualPrinter&&!exportPrinter&&<small>For paper output, choose a physical printer. {printer} is a virtual destination.</small>}
@@ -666,6 +710,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
     {!printerProblem&&supplyWarning&&<small role="status">{supplyWarning}</small>}
    </div>
   </div>
+  {selected.length>0&&chargeFields}
   <div className="photo-preview-display">
    {editorOpen||settingsOpen?null:selected.includes(original)?<DocumentPreview key={original} id={original}/>:photoPreview}
    {!plan&&!problem&&<div className="photo-preview-empty"><Images size={30}/><p role="status">{selected.length?'Preparing your preview…':'Tick the photos you want to print.'}</p></div>}
@@ -677,6 +722,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
    <div className="actions">
     <Button className="secondary" onClick={()=>setReviewPhoto('')}><ArrowLeft size={16}/> Back to print setup</Button>
     <Button className="secondary" onClick={()=>setReviewOriginal(!reviewOriginal)}>{reviewOriginal?'Show print preview':'Compare original'}</Button>
+    <Button className="secondary" disabled={busy} onClick={()=>setCropPhoto(reviewPhoto)}>Edit photo crop</Button>
     <Button disabled={busy} onClick={()=>{update(reviewPhoto,{documentLightening:defaultLightening});setReviewOriginal(false)}}>Lighten this photo</Button>
     <Button className="secondary" disabled={busy} onClick={()=>{applyFiltersToSelection({documentLightening:defaultLightening},'Document paper lightened for all selected photos.');setReviewOriginal(false)}}>Lighten all selected</Button>
     <Button className="quiet" disabled={busy} onClick={()=>{update(reviewPhoto,{documentLightening:0});setReviewOriginal(false)}}>Reset lightening</Button>
@@ -740,7 +786,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  </section>
  <section className="stack" hidden={settingsSection!=='Pricing'}><label>Pricing media category<input value={media} maxLength={80} onChange={e=>setMedia(e.target.value)}/></label><small>Billing category only. Select the matching actual media in Printer preferences.</small><label>Billing basis<select value={billing} onChange={e=>setBilling(e.target.value as typeof billing)}><option value="sheet">Per physical sheet</option><option value="side">Per printed side</option><option value="photo">Per requested photo print</option></select></label><label>Black &amp; white rate LKR<input type="number" min="0" step=".01" value={monoRate} onChange={e=>setMonoRate(Number(e.target.value))}/></label><label>Colour rate LKR<input type="number" min="0" step=".01" value={rate} onChange={e=>setRate(Number(e.target.value))}/></label><label>Paper cost per physical sheet (LKR)<input type="number" min="0" step=".01" value={paperRate} onChange={e=>setPaperRate(Number(e.target.value))}/></label><label>Finishing fee (LKR)<input type="number" min="0" step=".01" value={finishing} onChange={e=>setFinishing(Number(e.target.value))}/></label><label>Fixed service fee LKR<input type="number" min="0" step=".01" value={setupFee} onChange={e=>setSetupFee(Number(e.target.value))}/></label>{billing==='photo'&&priceSizes.map(key=><label key={key}>Size {key.split('x').map(n=>Number(n)/100).join(' x ')} mm rate LKR<input type="number" min="0" step=".01" value={sizeRates[key]??rate} onChange={e=>setSizeRates(prev=>({...prev,[key]:Number(e.target.value)}))}/></label>)}<Button className="secondary" onClick={async()=>{const existing=findPhotoPricing(pricingRules,options);if(await run('savePricingRule',{id:existing?.id,name:paper+' '+media+' photo pricing',media,paper,method:'photo',duplex:twoSided,policy:{...existing?.policy,basis:billing,mono:Math.round(monoRate*100),colour:Math.round(rate*100),paperPerSheet:Math.round(paperRate*100),finishing:Math.round(finishing*100),setup:Math.round(setupFee*100),photoSizes:billing==='photo'?Object.fromEntries(Object.entries(sizeRates).map(([key,value])=>[key,Math.round(value*100)])):undefined}},'Shop photo pricing saved'))setPricingRules(await window.bloom.call('pricingRules',null))}}>Save shop pricing for {paper}</Button><p>Applies to future estimates for this paper. Existing recorded order totals change only when explicitly saved.</p></section>
  <section className="stack" hidden={settingsSection!=='Quality'}><label>Warn below source DPI<input type="number" min="50" max="600" value={qualityThreshold} onChange={e=>setQualityThreshold(Math.max(50,Math.min(600,Number(e.target.value))))}/></label><label>Document raster DPI<select value={dpi} onChange={e=>setDpi(Number(e.target.value))}>{[72,150,300,600].map(n=><option key={n}>{n}</option>)}</select></label><label className="check"><input type="checkbox" checked={smoothing} onChange={e=>setSmoothing(e.target.checked)}/>Image smoothing</label><p>Printer quality, media and toner-saving options are managed in Printer preferences. Sharpening is applied to the disposable output raster. Manual photo positions are edited in millimetres.</p></section>
- <section className="stack" hidden={settingsSection!=='PDFs'}><label>Separate PDF printer<PrinterSelect value={pdfPrinter} change={setPdfPrinter}/></label><small>Leave empty to use the photo printer.</small><PrinterPropertiesButton printer={pdfPrinter||printer} disabled={busy} onClose={()=>setCapabilityAttempt(attempt=>attempt+1)}/><div className="form-grid"><label>PDF copies<input type="number" min="1" max="100" value={pdfCopies} onChange={e=>setPdfCopies(Number(e.target.value))}/></label><label>PDF pages per side<select value={pdfNup} onChange={e=>setPdfNup(Number(e.target.value))}>{[1,2,4,6,8,9,16].map(n=><option key={n}>{n}</option>)}</select></label><label>PDF sides<select value={pdfDuplex} onChange={e=>setPdfDuplex(e.target.value as typeof pdfDuplex)}><option value="simplex">One-sided</option><option value="longEdge">Duplex long edge</option><option value="shortEdge">Duplex short edge</option></select></label></div><label className="check"><input type="checkbox" checked={pdfColour} onChange={e=>setPdfColour(e.target.checked)}/>Colour PDFs</label><p>Print Now sends photos and PDFs in order using these settings. Both appear on one bill.</p>{data.attachments.filter(a=>a.status==='Ready'&&a.mime==='application/pdf'&&a.customer_id===(active?active.customer_id:customer==='walk-in'?null:customer)&&(!active||active.files.includes(a.id))).map(a=><label className="check" key={a.id}><input type="checkbox" checked={extraPdfs.includes(a.id)} onChange={e=>setExtraPdfs(ids=>e.target.checked?[...ids,a.id]:ids.filter(id=>id!==a.id))}/>{a.name} {pdfPages[a.id]!==undefined&&`(${pdfPages[a.id]} pages)`}</label>)}{active&&extraPdfs.length>0&&<><Button className="secondary" disabled={!pdfReady||!!problem||!pdfOutput.printer} onClick={()=>void run('print',{id:active.id,...pdfOutput},'PDF submission accepted; verify physical printing in Print Queue.')}>Print PDFs separately</Button><Button className="secondary" disabled={!pdfReady||!!problem} onClick={()=>void run('savePrintPdf',{id:active.id,...pdfOutput},'Prepared PDF document layout saved')}>Save PDF print layout</Button></>}</section>
+ <section className="stack" hidden={settingsSection!=='PDFs'}><label>Separate PDF printer<PrinterSelect value={pdfPrinter} change={setPdfPrinter}/></label><small>Leave empty to use the photo printer.</small><PrinterPropertiesButton printer={pdfPrinter||printer} disabled={busy} onClose={()=>setCapabilityAttempt(attempt=>attempt+1)}/><div className="form-grid"><label>PDF copies<input type="number" min="1" max="100" value={pdfCopies} onChange={e=>setPdfCopies(Number(e.target.value))}/></label><label>PDF pages per side<select value={pdfNup} onChange={e=>setPdfNup(Number(e.target.value))}>{[1,2,4,6,8,9,16].map(n=><option key={n}>{n}</option>)}</select></label><label>PDF sides<select value={pdfDuplex} onChange={e=>setPdfDuplex(e.target.value as typeof pdfDuplex)}><option value="simplex">One-sided</option><option value="longEdge">Duplex long edge</option><option value="shortEdge">Duplex short edge</option></select></label></div><label className="check"><input type="checkbox" checked={pdfColour} onChange={e=>setPdfColour(e.target.checked)}/>Colour PDFs</label><p>Print Now sends photos and PDFs in order using these settings. Both appear on one bill.</p>{data.attachments.filter(a=>a.status==='Ready'&&a.mime==='application/pdf'&&a.customer_id===(active?active.customer_id:customer==='walk-in'?null:customer)&&(!active||active.files.includes(a.id))).map(a=><label className="check" key={a.id}><input type="checkbox" checked={extraPdfs.includes(a.id)} onChange={e=>setExtraPdfs(ids=>e.target.checked?[...ids,a.id]:ids.filter(id=>id!==a.id))}/>{a.name} {pdfPages[a.id]!==undefined&&`(${pdfPages[a.id]} pages)`}</label>)}{active&&extraPdfs.length>0&&<><Button className="secondary" disabled={!pdfReady||!!problem||!pdfOutput.printer} onClick={()=>void run('print',{id:active.id,...pdfOutput,skipAutoMessages},'PDF submission accepted; verify physical printing in Print Queue.')}>Print PDFs separately</Button><Button className="secondary" disabled={!pdfReady||!!problem} onClick={()=>void run('savePrintPdf',{id:active.id,...pdfOutput},'Prepared PDF document layout saved')}>Save PDF print layout</Button></>}</section>
  <section className="stack" hidden={settingsSection!=='Photos'}><div className="photo-clarity stack">
  <h3>Filters for selected photos ({selected.length})</h3>
  {filterShortcuts}
@@ -773,13 +819,13 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  </div></details><Button className="quiet" disabled={item.quantity>=100||!plan} onClick={()=>duplicate(id)}>{!grid&&arrangement==='manual'?'Duplicate onto new side':'Duplicate one copy'}</Button><Button className="quiet" onClick={()=>removePhoto(id)}>Remove</Button></div>})}</section>
  <section className="stack" hidden={settingsSection!=='Pricing'}>
  <details><summary>Sheet and price breakdown</summary><div className="stack"><div className="print-calculation-summary"><div><small>Photographs</small><strong>{selected.length}</strong></div><div><small>Requested prints</small><strong>{plan?.photoCount??0}</strong></div><div><small>Physical photo sheets</small><strong>{sheets}</strong></div><div><small>Printed photo sides</small><strong>{photoQuote?.printedSides??0}</strong></div><div><small>Estimate</small><strong>{money(total)}</strong></div></div>{extraPdfs.length>0&&<><p>Total physical sheets including PDFs: {sheets+(pdfCalculation?.totalPhysicalSheets??0)}</p><p>Photo subtotal: {money(photoTotal)} / PDF subtotal: {money(pdfTotal)} ({pdfCopies} copies, {pdfNup}-up, {pdfDuplex==='simplex'?'one-sided':'two-sided'}; each PDF starts on a fresh sheet)</p></>}{photoQuote&&<dl className="detail-list"><div><dt>Paper ({photoQuote.physicalSheets} physical sheets)</dt><dd>{money(photoQuote.paperCost)}</dd></div><div><dt>Photo printing and setup</dt><dd>{money(photoQuote.printing)}</dd></div><div><dt>Finishing</dt><dd>{money(photoQuote.finishing)}</dd></div><div><dt>Colour / black &amp; white sides</dt><dd>{photoQuote.colourSides} / {photoQuote.blackAndWhiteSides}</dd></div></dl>}<p className="subtle">{priceSource==='shop print rates'?'No photo rate configured. Using shop print rates per physical sheet.':priceSource==='shop photo rate'?'Using the shop photo rate.':'Using the saved photo pricing rule.'}</p><p className="subtle">Photo billing: {photoQuote?.basis??'sheet'} ({photoQuote?.units??0} units), printing {money(photoQuote?.printing??0)}, finishing {money(photoQuote?.finishing??0)}.</p></div></details>
- {active&&<p>Recorded order: {money(active.total)}. Printing a revised layout keeps the recorded total unchanged.</p>}
- <details><summary>Order charges and discount</summary><div className="form-grid"><label>Extra charges (LKR)<input type="number" min="0" step=".01" value={charge} onChange={e=>setCharge(Number(e.target.value))}/></label><label>Discount (LKR)<input type="number" min="0" step=".01" value={discount} onChange={e=>setDiscount(Number(e.target.value))}/></label></div><p>Photo {money(photoTotal)} / PDF {money(pdfTotal)} / Extras {money(adjustments.charge)} / Discount {money(adjustments.discount)}</p></details>
+ {active&&<p>Recorded order: {money(active.total)}</p>}
+ {chargeFields}
  </section>
  </div>
  <aside className="stack photo-settings-preview">
  <h3>{selected.length?'Live sheet preview':'Example layout'}</h3>
- {plan&&<div className="total"><span>{active?'Order total':'Estimated price'}</span><strong>{money(active?.total??total)}</strong></div>}
+ {plan&&<div className="total"><span>{active?'Order total':'Estimated price'}</span><strong>{money(orderTotal)}</strong></div>}
  {printButton}
  {photoPreview??(selected.length?<p role="status">{problem||'Preparing selected photos…'}</p>:<div className="photo-layout-example" aria-label={grid?rows+' rows, '+columns+' columns':'Example photo frame'} style={{aspectRatio:landscape?'1.414':'0.707',gridTemplateColumns:'repeat('+Math.min(8,Math.max(1,grid?columns:1))+', minmax(0, 1fr))'}}>{Array.from({length:grid?Math.min(8,Math.max(1,rows))*Math.min(8,Math.max(1,columns)):1},(_,index)=><span key={index}>{index+1}</span>)}</div>)}
  <small>{paper} {landscape?'landscape':'portrait'} · {selected.length} selected · {sheets} {sheets===1?'sheet':'sheets'}</small>
@@ -802,6 +848,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   <div className="photo-order-thumbnail"><DocumentThumbnail id={id}/></div>
  <div className="photo-order-caption"><strong>{index+1}. {data.attachments.find(file=>file.id===id)?.name}</strong><small>{photoItems[id].quantity} {photoItems[id].quantity===1?'copy':'copies'}</small></div>
  <div className="actions photo-order-move">
+  <Button className="quiet" disabled={busy} onClick={()=>setCropPhoto(id)}>Edit photo</Button>
   <Button className="quiet" aria-label={'Move photo '+(index+1)+' earlier'} title="Move earlier" disabled={index===0} onClick={()=>movePhoto(index,index-1)}><ArrowUp size={15}/></Button>
   <Button className="quiet" aria-label={'Move photo '+(index+1)+' later'} title="Move later" disabled={index===selected.length-1} onClick={()=>movePhoto(index,index+1)}><ArrowDown size={15}/></Button>
  </div>
@@ -823,5 +870,6 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  </aside>
  </div>
  </DetailDrawer>}
+ {selected.includes(cropPhoto)&&<PhotoCropEditor key={cropPhoto} id={cropPhoto} initial={photoItems[cropPhoto].crop} limit={Math.max(1,cropLimit)} onClose={()=>setCropPhoto('')} onApply={crops=>applyPhotoCrops(cropPhoto,crops)}/>}
  </div>
 }

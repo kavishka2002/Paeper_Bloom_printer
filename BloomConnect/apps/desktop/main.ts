@@ -230,7 +230,11 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
       }`);
       const [width,height]=paperDimensions(input.paper,input.customPaper);
       const pageSize={width:Math.round(width*1000),height:Math.round(height*1000)};
-      const manifest=await win.webContents.executeJavaScript('window.__printManifest') as {widthMm:number;heightMm:number;hasColour:boolean;sides:number};
+      const manifest=await win.webContents.executeJavaScript('window.__printManifest') as PrintManifest;
+      if(!await confirmPrintResolution(manifest)){
+        cancelled=true;
+        throw new Error('Print cancelled. Select a smaller page range to keep the chosen resolution.');
+      }
       const landscape=Math.abs(width-height)<.001?input.landscape:Math.abs(manifest.widthMm-height)<.01&&Math.abs(manifest.heightMm-width)<.01;
       sheetLandscape=manifest.widthMm===manifest.heightMm?input.landscape:manifest.widthMm>manifest.heightMm;
       edge=duplexEdge(pass.duplex,sheetLandscape);
@@ -303,6 +307,18 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
   }
   return {entry};
 }
+type PrintManifest={widthMm:number;heightMm:number;hasColour:boolean;sides:number;renderDpi?:number;requestedDpi?:number};
+async function confirmPrintResolution(manifest:PrintManifest){
+  const {renderDpi,requestedDpi}=manifest;
+  if(renderDpi===undefined||requestedDpi===undefined||renderDpi>=requestedDpi)return true;
+  const answer=await dialog.showMessageBox(main,{
+    type:'warning',title:'Print resolution',
+    message:`This job fits at ${renderDpi} DPI. You selected ${requestedDpi} DPI.`,
+    detail:'To keep the selected resolution, cancel and use a smaller page range. For a booklet, print one signature at a time only if the finished binding allows it.',
+    buttons:['Continue at '+renderDpi+' DPI','Cancel'],defaultId:1,cancelId:1
+  });
+  return answer.response===0;
+}
 async function savePreparedPdf(input:Input<'savePrintPdf'>){
   const files=await selectedPrintFiles(input);
   if(!files.length)throw new Error('This order has no files.');
@@ -318,6 +334,8 @@ async function savePreparedPdf(input:Input<'savePrintPdf'>){
       printViews.set(win.webContents.id,{data:{input,files},ready:error=>{clearTimeout(timer);error?reject(new Error(error)):resolve()}});
     });
     await Promise.all([win.loadURL(index+'?print=1'),rendered]);
+    const manifest=await win.webContents.executeJavaScript('window.__printManifest') as PrintManifest;
+    if(!await confirmPrintResolution(manifest))return false;
     const bytes=await win.webContents.printToPDF({preferCSSPageSize:true,printBackground:true,margins:{top:0,bottom:0,left:0,right:0}});
     await writeFile(selected.filePath,bytes);return true;
   }finally{printViews.delete(win.webContents.id);win.destroy()}
@@ -676,7 +694,7 @@ else void app.whenReady().then(async()=>{
           const wait=async(test)=>{for(let i=0;i<200;i++){const result=test();if(result)return result;await new Promise(resolve=>setTimeout(resolve,80))}throw new Error('Advanced studio wait failed: '+document.body.innerText.slice(-2000))};
           const snapshot=await window.bloom.call('snapshot',null);
           const file=snapshot.attachments.find(item=>item.name==='advanced-ten-pages.pdf');
-          const printSettings={printer:'',paper:'A4',copies:1,colour:false,landscape:false,duplex:'longEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:false,binding:'left',marginMm:5,gapMm:2,borders:true};
+          const printSettings={printer:'',paper:'A4',renderDpi:300,copies:1,colour:false,landscape:false,duplex:'longEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:false,binding:'left',marginMm:5,gapMm:2,borders:true};
           const id=await window.bloom.call('order',{customer:null,files:[file.id],copies:1,paper:'A4',colour:false,price:0,discount:0,charge:0,printSettings,calculations:[{id:file.id,settings:{documentPages:10,pagesPerSide:2,duplex:'longEdge',pricing:{basis:'sheet',mono:1000,colour:5000}}}]});
           (await wait(()=>[...document.querySelectorAll('nav button')].find(button=>button.getAttribute('aria-label')==='Print Studio'))).click();
           const order=await wait(()=>document.querySelector('select[aria-label="Order"]'));
@@ -710,7 +728,7 @@ else void app.whenReady().then(async()=>{
         await new Promise(resolve=>setTimeout(resolve,250));
         await writeFile(join(root,'advanced-studio-booklet.png'),(await main.capturePage()).toPNG());
         main.webContents.debugger.detach();
-        const options=schemas.print.parse({id:result.id,printer:'Smoke only - no submission',paper:'A4',copies:1,colour:false,landscape:true,duplex:'shortEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:true,binding:'left',marginMm:5,gapMm:2,borders:true});
+        const options=schemas.print.parse({id:result.id,printer:'Smoke only - no submission',paper:'A4',renderDpi:300,copies:1,colour:false,landscape:true,duplex:'shortEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:true,binding:'left',marginMm:5,gapMm:2,borders:true});
         const printWindow=new BrowserWindow(printWindowOptions);lock(printWindow);
         try{
           const prepared=new Promise<void>((resolve,reject)=>{
@@ -718,11 +736,12 @@ else void app.whenReady().then(async()=>{
             printViews.set(printWindow.webContents.id,{data:{input:options,files:[{id:result.file}]},ready:error=>{clearTimeout(timer);error?reject(new Error(error)):resolve()}});
           });
           await Promise.all([printWindow.loadURL(index+'?print=1'),prepared]);
-          const output=await printWindow.webContents.executeJavaScript(`({sides:document.querySelectorAll('.sheet').length,first:document.querySelector('.sheet canvas').toDataURL()})`);
+          const output=await printWindow.webContents.executeJavaScript(`({sides:document.querySelectorAll('.sheet').length,first:document.querySelector('.sheet canvas').toDataURL(),dpi:window.__printManifest.renderDpi})`);
+          if(output.dpi!==300)throw new Error('Booklet must retain its selected 300 DPI.');
           if(output.sides!==6)throw new Error('Booklet must prepare six imposed sides.');
           if(output.first!==result.preview)throw new Error('Preview does not match the submitted raster layout.');
           const printers=await main.webContents.getPrintersAsync();
-          await writeFile(join(root,'advanced-print-smoke.json'),JSON.stringify({logicalPages:Number(result.selectedPages),physicalSheets:Number(result.sheets),imposedSides:output.sides,previewMatchesPreparedSide:true,threeUpHandoutVerified:true,bookletWizardVerified:true,availablePrinters:printers.map(printer=>printer.name),physicalPrintingExecuted:false}));
+          await writeFile(join(root,'advanced-print-smoke.json'),JSON.stringify({logicalPages:Number(result.selectedPages),physicalSheets:Number(result.sheets),imposedSides:output.sides,renderDpi:output.dpi,previewMatchesPreparedSide:true,threeUpHandoutVerified:true,bookletWizardVerified:true,availablePrinters:printers.map(printer=>printer.name),physicalPrintingExecuted:false}));
         }finally{printViews.delete(printWindow.webContents.id);printWindow.destroy()}
       }
 

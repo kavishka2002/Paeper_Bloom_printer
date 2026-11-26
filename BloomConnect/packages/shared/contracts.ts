@@ -8,6 +8,8 @@ import {scanSettingsSchema,type ScanPreview} from './scan';
 const id = z.string().min(1).max(256);
 const label = z.string().trim().min(1).max(160);
 const cents = z.number().int().min(0).max(100000000);
+const photoCrop=z.object({x:z.number().min(0).max(.99),y:z.number().min(0).max(.99),width:z.number().min(.01).max(1),height:z.number().min(.01).max(1)})
+  .refine(crop=>crop.x+crop.width<=1.000001&&crop.y+crop.height<=1.000001,'Keep the crop within the original photo.');
 export const stages = ['New','Awaiting Confirmation','Processing','Ready to Print','Printing','Ready for Pickup','Completed','Cancelled','Failed'] as const;
 export const triggers = ['message','keyword','pdf','image','document','print-completed','payment-completed','pickup','files-received','order-created','printing-started','collected','ready-to-print','print-queued','price-confirmed'] as const;
 export const actions = ['order','notify','label','reply'] as const;
@@ -38,7 +40,8 @@ export const schemas = {
   customer:z.object({id:id.optional(),name:label,phone:z.string().regex(/^\+?[1-9]\d{6,14}$/).or(z.literal('')),notes:z.string().max(4000),tag:z.string().max(120)}),
   import:z.object({customer:id.nullable()}), preview:z.object({id,page:z.number().int().min(1).max(10000).optional(),compatibleImage:z.boolean().optional(),imageMaxSide:z.number().int().min(64).max(1800).optional()}),
   fileReference:z.object({id}), cancelMedia:z.object({id}), retryMedia:z.object({id}), read:z.object({id}),
-  order:z.object({customer:id.nullable(),files:z.array(id).min(1).max(40),copies:z.number().int().min(1).max(100),paper:z.enum(paperNames),colour:z.boolean(),price:cents,discount:cents,charge:cents,calculations:z.array(z.object({id,settings:calculationSchema})).min(1).max(40).optional(),printSettings:printSettingsSchema.optional()}),
+  createPhotoCrops:z.object({id,crops:z.array(photoCrop).min(1).max(39)}),
+  order:z.object({customer:id.nullable(),skipAutoMessages:z.boolean().optional(),files:z.array(id).min(1).max(40),copies:z.number().int().min(1).max(100),paper:z.enum(paperNames),colour:z.boolean(),price:cents,discount:cents,charge:cents,calculations:z.array(z.object({id,settings:calculationSchema})).min(1).max(40).optional(),printSettings:printSettingsSchema.optional()}),
   updatePhotoOrder:z.object({id,files:z.array(id).min(1).max(40),printSettings:printSettingsSchema,total:cents,reason:z.string().trim().min(3).max(500)}),
   quote:z.object({id,total:cents,reason:z.string().trim().min(3).max(500)}),
   confirmPrice:z.object({id,total:cents}),
@@ -46,7 +49,7 @@ export const schemas = {
   stage:z.object({id,status:z.enum(stages)}),
   payment:z.object({id,amount:cents.positive(),method:z.enum(['Cash','Bank Transfer','Other'])}),
   receipt:z.object({id}),bill:z.object({id}),saveAttachment:z.object({id}),
-  print:printSettingsSchema.extend({id,printer:label}),
+  print:printSettingsSchema.extend({id,printer:label,skipAutoMessages:z.boolean().optional()}),
   saveStudioDocument:z.object({name:z.string().min(1).max(180),format:z.enum(['pdf','zip','png','jpg','txt','docx']),bytes:z.instanceof(Uint8Array).refine(bytes=>bytes.length>0&&bytes.length<=150*1024*1024,'The export must be between 1 byte and 150 MB.')}),
   cleanStudioScan:z.object({bytes:z.instanceof(Uint8Array).refine(bytes=>bytes.length>0&&bytes.length<=50*1024*1024),settings:scanSettingsSchema}),
   recognizeStudioScan:z.object({bytes:z.instanceof(Uint8Array).refine(bytes=>bytes.length>0&&bytes.length<=50*1024*1024),language:z.enum(['eng','sin','eng+sin'])}),
@@ -65,7 +68,7 @@ export type Input<K extends Operation>=z.input<(typeof schemas)[K]>;
 export type Customer={id:string;name:string;phone:string;notes:string;tag:string;created:string;last:string};
 export type Attachment={id:string;customer_id:string|null;message_id:string|null;name:string;mime:string;status:string;created:string;bytes:number;download?:{bytes:number;total?:number;error?:string}};
 export type Message={id:string;customer_id:string;body:string;kind:string;direction:string;status:string;created:string;unread:number};
-export type Job={id:string;customer_id:string|null;status:typeof stages[number];copies:number;paper:string;colour:number;total:number;paid:number;created:string;files:string[];printSettings?:Omit<Input<'print'>,'id'>;calculations?:{id:string;settings:CalculationInput;result:PrintCalculation}[]};
+export type Job={id:string;skipAutoMessages?:boolean;customer_id:string|null;status:typeof stages[number];copies:number;paper:string;colour:number;total:number;paid:number;created:string;files:string[];printSettings?:Omit<Input<'print'>,'id'>;calculations?:{id:string;settings:CalculationInput;result:PrintCalculation}[]};
 export type Payment={id:string;job_id:string;amount:number;method:string;created:string};
 export type QueueEntry={id:string;job_id:string;printer:string;status:string;error:string;created:string;settings:string|null};
 export type Rule=Input<'rule'>&{id:string};
@@ -76,5 +79,5 @@ export type PrintPreset={id:string;name:string;settings:Input<'print'>;builtin?:
 export type PricingRule=Input<'savePricingRule'>&{id:string};
 export type Preview={mime:string;bytes:Uint8Array};
 export type FileReference={url:string;mime:string;bytes:number};
-export type Results={fileReference:FileReference;saveStudioDocument:boolean;importStudioPrint:string;convertStudioWord:Uint8Array;secureStudioPdf:Uint8Array;cleanStudioScan:ScanPreview;recognizeStudioScan:{text:string;pdf:Uint8Array};bill:boolean;saveAttachment:boolean;reply:string;scanPreview:ScanPreview;saveScan:string;combineScans:string;exportScannedPdf:boolean;appInfo:{version:string};convertDocument:string;manualFeedProfile:ManualFeedProfile|null;notificationLog:{sendAttempts:{attempted:string;result:string;error:string}[];delivery_status:string|null;id:string;rule_id:string;customer_id:string;event_key:string;status:string;attempts:number;error:string;created:string}[];print:{manualToken?:string;entry:string};manualContinue:{entry:string};savePrintPdf:boolean;printerCapabilities:PrinterCapabilities;printPresets:{presets:PrintPreset[];defaultId:string|null};pricingRules:PricingRule[];printEstimate:PrintCalculation;webChatSync:{messages:number;documents:number;partial:boolean};snapshot:Snapshot;printers:Printer[];preview:Preview;import:number;order:string;backup:boolean;receipt:boolean};
+export type Results={createPhotoCrops:string[];fileReference:FileReference;saveStudioDocument:boolean;importStudioPrint:string;convertStudioWord:Uint8Array;secureStudioPdf:Uint8Array;cleanStudioScan:ScanPreview;recognizeStudioScan:{text:string;pdf:Uint8Array};bill:boolean;saveAttachment:boolean;reply:string;scanPreview:ScanPreview;saveScan:string;combineScans:string;exportScannedPdf:boolean;appInfo:{version:string};convertDocument:string;manualFeedProfile:ManualFeedProfile|null;notificationLog:{sendAttempts:{attempted:string;result:string;error:string}[];delivery_status:string|null;id:string;rule_id:string;customer_id:string;event_key:string;status:string;attempts:number;error:string;created:string}[];print:{manualToken?:string;entry:string};manualContinue:{entry:string};savePrintPdf:boolean;printerCapabilities:PrinterCapabilities;printPresets:{presets:PrintPreset[];defaultId:string|null};pricingRules:PricingRule[];printEstimate:PrintCalculation;webChatSync:{messages:number;documents:number;partial:boolean};snapshot:Snapshot;printers:Printer[];preview:Preview;import:number;order:string;backup:boolean;receipt:boolean};
 export type Bridge={importDropped:(files:File[],customer:string|null)=>Promise<number>;call:<K extends Operation>(operation:K,input:Input<K>)=>Promise<K extends keyof Results?Results[K]:void>;subscribe:(listener:()=>void)=>()=>void};

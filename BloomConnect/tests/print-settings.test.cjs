@@ -4,6 +4,24 @@ const mod={exports:{}};new Function('module','exports','require',code)(mod,mod.e
 const {sharpenPixels,enhancePixels,effectiveDpi,effectivePhotoPricing,quotePhotos,photoSizeKey,planPhotos,reorderPhotoFrames,tightPhotoFrame,constrainPhotoFrame,planDocument,plannedOutput,placementGeometry,analysePixels,normalizedSettings,validatePrinter}=mod.exports;
 const base={printer:'Test',paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'};
 const doc={id:'file',mime:'application/pdf',pages:Array.from({length:10},()=>({widthMm:210,heightMm:297,blank:false,ink:'mono',coverage:0}))};
+test('new document jobs prefer 300 DPI when a single sheet fits the raster limit',()=>{
+ assert.equal(mod.exports.defaultDocumentDpi('A4'),300);
+ assert.equal(mod.exports.defaultDocumentDpi('A3'),300);
+ assert.equal(mod.exports.defaultDocumentDpi('A2'),150);
+ assert.equal(mod.exports.defaultDocumentDpi('Custom',{widthMm:210,heightMm:297}),300);
+ assert.equal(mod.exports.defaultDocumentDpi('Custom'),150);
+});
+test('six image copies fit one six-up sheet and odd duplex sides are padded',()=>{
+ const photo={...doc,mime:'image/jpeg',pages:[doc.pages[0]]};
+ const one=planDocument({...base,nup:6,copies:6},photo);
+ assert.equal(one.photoCount,6);
+ assert.equal(plannedOutput(one).length,1);
+ assert.equal(one.sides[0].placements.length,6);
+ assert.equal(new Set(one.sides[0].placements.map(({box})=>box.x+','+box.y)).size,6);
+ const two=planDocument({...base,nup:6,copies:13,duplex:'longEdge'},photo);
+ assert.deepEqual(plannedOutput(two).map(side=>side.placements.length),[6,6,1,0]);
+ assert.equal(plannedOutput(planDocument({...base,copies:6},photo)).length,6);
+});
 test('111 A4 sides fit the raster budget without dropping pages',()=>{
  const sides=Array.from({length:111},()=>[210,297]);
  const dpi=mod.exports.fitRasterDpi(sides,150);
@@ -124,6 +142,13 @@ test('Toshiba 257 low-toner warning permits supported jobs while paper and offli
  assert.throws(()=>validatePrinter(normalizedSettings({...base,printer,paper:'A3'}),supported),/paper size/);
  assert.throws(()=>validatePrinter(normalizedSettings({...base,printer,colour:true}),supported),/colour output/);
  assert.throws(()=>validatePrinter(normalizedSettings({...base,printer}),{...supported,offline:true}),/offline/);
+});
+
+test('missing driver paper metadata permits standard paper for manual duplex',()=>{
+ const caps={name:'Test',offline:false,status:3,error:0,colour:true,duplex:false,papers:[],trays:[],resolutions:[]};
+ const settings=normalizedSettings({...base,colour:true,duplex:'manualLongEdge'});
+ assert.doesNotThrow(()=>mod.exports.validateSubmissionPrinter(settings,caps));
+ assert.throws(()=>mod.exports.validateSubmissionPrinter({...settings,scaling:'printable'},caps),/paper size/);
 });
 
 const photoDoc=id=>({id,mime:'image/jpeg',pages:[{widthMm:100,heightMm:150,blank:false,ink:'colour',coverage:1}]});

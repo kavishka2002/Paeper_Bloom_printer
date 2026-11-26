@@ -74,13 +74,13 @@ export function RevenueChart({payments,orders,days=7}:{payments:DailyAmount[];or
 export function ActivityList({entries}:{entries:{kind:string;detail:string;created:string;id:number}[]}){
  return <ol className="timeline">{entries.map(item=><li key={item.id}><span className="timeline-dot"/><div><strong>{item.kind}</strong><p>{item.detail}</p></div><small>{stamp(item.created)}</small></li>)}</ol>;
 }
-export function PageLayoutChoices({value,change,landscape}:{value:number;change:(value:number)=>void;landscape:boolean}){
- return <div className="page-layout-choices" role="group" aria-label="Pages per side — එක් පැත්තකට පිටු ගණන">
+export function PageLayoutChoices({value,change,landscape,copies=false}:{value:number;change:(value:number)=>void;landscape:boolean;copies?:boolean}){
+ return <div className="page-layout-choices" role="group" aria-label={copies?'Copies per side':'Pages per side'}>
   {([1,2,4,6,8,9,16] as const).map(count=>{
    const [columns]=gridShape({nup:count,booklet:false},landscape?297:210,landscape?210:297);
    return <Button key={count} className="secondary" aria-pressed={value===count} onClick={()=>change(count)}>
     <span className="page-layout-example" aria-hidden="true" data-landscape={landscape} style={{gridTemplateColumns:`repeat(${columns},1fr)`}}>{Array.from({length:count},(_,i)=><i key={i}/>)}</span>
-    <span>{count} {count===1?'page':'pages'}</span>
+    <span>{count} {copies?(count===1?'copy':'copies'):(count===1?'page':'pages')}</span>
    </Button>;
   })}
  </div>;

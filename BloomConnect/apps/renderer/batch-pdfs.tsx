@@ -1,3 +1,4 @@
+import {SkipAutoMessages} from './print-settings';
 import {useEffect,useId,useRef,useState,type ReactNode} from 'react';
 import {useQueryClient} from '@tanstack/react-query';
 import {ArrowDown,ArrowUp,BookOpen,Printer} from 'lucide-react';
@@ -53,6 +54,8 @@ export function BatchPdfStudio({initialFile,initialFiles,onSubmitted,renderEdito
  const pdfDestination=isPdfPrinter(printer,preferred?.displayName)||pdfDrivers.includes(printer);
  const virtualPrinter=isVirtualPrinter(printer)||isVirtualPrinter(preferred?.displayName??'');
  const owner=customer==='walk-in'?null:customer;
+ const [skipAutoMessages,setSkipAutoMessages]=useState(active?.skipAutoMessages??false);
+ useEffect(()=>setSkipAutoMessages(active?.skipAutoMessages??false),[owner,active?.id,active?.skipAutoMessages]);
  const files=data.attachments.filter(file=>file.status==='Ready'&&file.mime==='application/pdf'&&file.customer_id===owner);
  const matchedFiles=files.filter(file=>orderId?selected.includes(file.id):file.name.toLowerCase().includes(fileSearch.trim().toLowerCase()));
  const visibleFiles=[...selected.flatMap(id=>matchedFiles.filter(file=>file.id===id)),...matchedFiles.filter(file=>!selected.includes(file.id))];
@@ -152,7 +155,7 @@ export function BatchPdfStudio({initialFile,initialFiles,onSubmitted,renderEdito
    let id=orderId;
    if(!id){
     const base=settingsFor(printer,defaults);
-    id=await window.bloom.call('order',{customer:owner,files:selected,copies:base.copies,paper:base.paper,colour:base.colour,price:0,...adjustments,calculations,printSettings:{...base,batchPdfFiles:settings}});
+    id=await window.bloom.call('order',{customer:owner,files:selected,copies:base.copies,paper:base.paper,colour:base.colour,price:0,...adjustments,calculations,skipAutoMessages,printSettings:{...base,batchPdfFiles:settings}});
     setOrderId(id);
     if(!initialFile)workspace.set({job:id});
    }
@@ -181,7 +184,7 @@ export function BatchPdfStudio({initialFile,initialFiles,onSubmitted,renderEdito
      }
      setExports(previous=>[...previous,file]);
     }else{
-     await window.bloom.call('print',request);
+     await window.bloom.call('print',{...request,skipAutoMessages});
      setSubmissions(previous=>[...previous,...group]);
      if(onSubmitted)group.forEach(onSubmitted);
     }
@@ -294,6 +297,7 @@ export function BatchPdfStudio({initialFile,initialFiles,onSubmitted,renderEdito
    <PrintEstimate subtotal={quote?.finalTotal} total={savedOrder?.total??(problem?undefined:estimatedTotal)} label={orderId?'Order total':'Combined bill'}
     adjustments={savedOrder?.printSettings?.orderAdjustments} editable={!orderId?{charge,discount,setCharge,setDiscount,disabled:busy}:undefined}/>
    {notice&&<p role="status">{notice}</p>}
+   {!pdfDestination&&owner&&<SkipAutoMessages value={skipAutoMessages} change={setSkipAutoMessages} disabled={busy||editorOpen}/>}
    <PrinterPropertiesButton printer={printer} disabled={busy||editorOpen}/>
    <Button disabled={!canPrint} aria-busy={busy} aria-describedby={printerProblem||pdfDestination||virtualPrinter?printerStatusId:undefined} onClick={()=>void submit()}><Printer size={17}/>{pdfDestination?'Save PDF':orderId&&remaining.length&&remaining.length<selected.length?'Print remaining PDFs':'Print Now'}</Button>
    {savedOrder&&<Button className="secondary" disabled={busy} onClick={()=>setBillOpen(true)}>View or send combined bill</Button>}

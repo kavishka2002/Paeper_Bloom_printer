@@ -77,6 +77,11 @@ async function checkWorkflow(){
      return {mime,bytes:data.length,url};
     }
     if(op==='preview')return input.id.startsWith('photo-')?{mime:'image/png',bytes:photoBytes.slice()}:{mime:'application/pdf',bytes:bytes.slice()};
+    if(op==='createPhotoCrops'){
+     window.savedCrops=input;
+     data.attachments.push({...photoA,id:'photo-crop',name:'crop.png',message_id:null});
+     return ['photo-crop'];
+    }
     if(op==='webChatSync'&&input.id==='history-chat'){
      if(!data.attachments.some(item=>item.id==='history-pdf'))data.attachments.push({...file,id:'history-pdf',message_id:'history-message',customer_id:input.id,name:'history.pdf',mime:'',status:'Available to download'});
      return {messages:1,documents:1,partial:false};
@@ -209,6 +214,7 @@ async function checkWorkflow(){
   await page.waitForFunction(()=>window.attempts.length===2);
   assert.equal(await page.evaluate(()=>window.orders.length),1);
   assert.equal(await page.evaluate(()=>window.attempts[1].nup),4);
+  assert.equal(await page.evaluate(()=>window.attempts[1].skipAutoMessages),false);
   await page.evaluate(()=>window.navigate('Orders'));
   await click('Bill / payment');
   await click('Save printable bill','dialog[open]');
@@ -340,6 +346,30 @@ async function checkWorkflow(){
   const strip='section[aria-label="Selected photos"]';
   await page.waitForSelector(strip+' canvas[data-loaded="true"]');
   assert.equal(await page.$$eval(strip+' .photo-selected-card',cards=>cards.length),2);
+  await page.click(strip+' button[aria-label="Edit photo photo-a.png"]');
+  const cropDialog='dialog[aria-label="Edit photo crop"]';
+  await page.waitForFunction(selector=>document.querySelector(selector+' img')?.naturalWidth>0,{},cropDialog);
+  await page.$eval(cropDialog,dialog=>Promise.all(dialog.getAnimations().map(animation=>animation.finished)));
+  const cropSurface=await page.$(cropDialog+' .photo-crop-surface');
+  async function dragCrop(left,right){
+   await cropSurface.scrollIntoView();
+   const cropBox=await cropSurface.boundingBox();
+   await page.mouse.move(cropBox.x+cropBox.width*left,cropBox.y+cropBox.height*.2);
+   await page.mouse.down();
+   await page.mouse.move(cropBox.x+cropBox.width*right,cropBox.y+cropBox.height*.8,{steps:4});
+   await page.mouse.up();
+  }
+  await dragCrop(.1,.4);
+  await click('Add crop',cropDialog);
+  await dragCrop(.55,.9);
+  await click('Use 2 crops',cropDialog);
+  await page.waitForSelector(cropDialog,{hidden:true});
+  assert.equal(await page.evaluate(()=>window.savedCrops.crops.length),1);
+  assert.equal(await page.$$eval(strip+' .photo-selected-card',cards=>cards.length),3);
+  await page.click(strip+' button[aria-label="Remove crop.png from selection"]');
+  const additionalCharge='.photo-review-panel .photo-charge-fields input';
+  await page.click(additionalCharge,{clickCount:3});
+  await page.type(additionalCharge,'25.50');
   async function openPhoto(name){
    await page.click(strip+' button[aria-label="Preview '+name+'"]');
    const drawer='dialog[open][aria-label="Photo preview · '+name+'"]';
@@ -379,11 +409,14 @@ async function checkWorkflow(){
   await page.waitForFunction(()=>window.attempts.length===6);
   assert.equal(await page.evaluate(()=>window.orders.length),3);
   assert.equal(await page.evaluate(()=>window.orders.at(-1).colour),false);
+  assert.equal(await page.evaluate(()=>window.orders.at(-1).charge),2550);
   const photoPrint=await page.evaluate(()=>window.attempts.at(-1));
   assert.equal(photoPrint.paper,'A4');
   assert.equal(photoPrint.colour,false);
   assert.equal(photoPrint.fit,'cover');
   assert.equal(photoPrint.photoGrid.rows*photoPrint.photoGrid.columns,1);
+  const appliedCrop=photoPrint.photoItems['photo-a'].crop;
+  assert.ok(appliedCrop.width>.2&&appliedCrop.width<.4,JSON.stringify(appliedCrop));
   assert.deepEqual(Object.values(photoPrint.photoItems).map(item=>item.ink),['mono','mono']);
   await click('Back','.photo-studio-heading');
   await page.waitForSelector('.photo-studio-heading',{hidden:true});
@@ -479,6 +512,32 @@ async function checkWorkflow(){
   await page.waitForSelector(attachmentPreview+' [role="status"]');
   await page.evaluate(()=>window.finishHistoryDownload());
   await page.waitForSelector(attachmentPreview+' canvas:not([hidden])');
+  await page.goto(page.url());
+  await page.evaluate(()=>localStorage.setItem('lastDocumentPrinter','TOSHIBA e-STUDIO257'));
+  await page.waitForFunction(()=>[...document.querySelectorAll('.studio-files button')].some(button=>button.textContent.startsWith('photo-a.png')));
+  await page.evaluate(()=>[...document.querySelectorAll('.studio-files button')].find(button=>button.textContent.startsWith('photo-a.png')).click());
+  await page.select('.document-print-settings select[aria-label="Printer"]','TOSHIBA e-STUDIO257');
+  await page.$eval('.document-print-settings input[type="number"]',input=>{
+   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'6');
+   input.dispatchEvent(new Event('input',{bubbles:true}));
+  });
+  await page.evaluate(()=>{
+   const picker=[...document.querySelectorAll('.document-print-settings label')].find(label=>label.textContent.startsWith('Copies per side')).querySelector('select');
+   Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(picker,'6');
+   picker.dispatchEvent(new Event('change',{bubbles:true}));
+  });
+  await page.waitForFunction(()=>{
+   const button=document.querySelector('.print-sticky-actions button[type="submit"]');
+   const sheet=[...document.querySelectorAll('.print-calculation-summary div')].find(row=>row.firstChild?.textContent==='Physical sheets');
+   return button&&!button.disabled&&button.getBoundingClientRect().bottom<=innerHeight&&sheet?.lastChild?.textContent==='1';
+  });
+  await page.evaluate(()=>{
+   const label=[...document.querySelectorAll('.print-sticky-actions label')].find(item=>item.textContent.includes('Skip automatic WhatsApp messages'));
+   label.querySelector('input').click();
+  });
+  assert.equal(await page.$('.print-sticky-actions textarea'),null);
+  await click('Print Now');
+  await page.waitForFunction(()=>window.attempts[0]?.nup===6&&window.attempts[0]?.copies===6&&window.attempts[0]?.skipAutoMessages===true);
   const duplexFixture=new URL(page.url());
   duplexFixture.searchParams.set('duplex-test','1');
   await page.goto(duplexFixture.href);

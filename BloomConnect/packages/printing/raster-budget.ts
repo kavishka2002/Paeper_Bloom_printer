@@ -1,5 +1,13 @@
+import {paperDimensions,type Paper} from './paper';
+
 const maxPixels=120_000_000;
 const minimumDpi=72;
+
+export function defaultDocumentDpi(paper:Paper,custom?:{widthMm:number;heightMm:number}){
+ if(paper==='Custom'&&!custom)return 150;
+ const [width,height]=paperDimensions(paper,custom);
+ return width*height*(300/25.4)**2<=20_000_000?300:150;
+}
 
 export function fitRasterDpi(dimensions:readonly (readonly [number,number])[],requestedDpi:number){
  const pixelsAt=(dpi:number)=>dimensions.reduce((pixels,[width,height])=>

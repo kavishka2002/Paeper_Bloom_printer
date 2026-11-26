@@ -160,7 +160,7 @@ export function ProfessionalSettings({settings,change,capabilities:cap,refresh}:
  {select('Colour processing','ink',[['legacy','Use basic ink choice'],['colour','Full colour'],['mono','Black and white'],['grayscale','Grayscale'],['auto','Detect colour from page content'],['mixed','Selected colour pages']],settings.ink??'legacy')}
  {(settings.ink==='auto'||settings.ink==='mixed')&&<><label>Colour pages<input value={settings.colourRange??''} placeholder="1-5, 8" onChange={e=>change({colourRange:e.target.value,analysisConfirmed:false})}/></label><small>Enter pages to override detection. Other pages will render in grayscale. Colour analysis is estimated from the source preview.</small><label className="check"><input type="checkbox" checked={!!settings.analysisConfirmed} onChange={e=>change({analysisConfirmed:e.target.checked})}/> Accept estimated colour on uncertain pages</label></>}
  {(['brightness','contrast'] as const).map(key=><label key={key}>{key} %<input type="number" min={25} max={200} value={settings[key]??100} onChange={e=>change({[key]:Number(e.target.value)})}/></label>)}
- <label>Document raster DPI<select value={settings.renderDpi??150} onChange={e=>change({renderDpi:Number(e.target.value)})}>{[72,96,150,200,300,600].map(n=><option key={n}>{n}</option>)}</select></label><small>Large paper/DPI combinations are rejected when they exceed safe memory limits. This is preprocessing DPI, not the printer resolution.</small>
+ <label>Document raster DPI<select value={settings.renderDpi??150} onChange={e=>change({renderDpi:Number(e.target.value)})}>{[72,96,150,200,300,600].map(n=><option key={n}>{n}</option>)}</select></label><small>Print Studio asks before lowering this DPI for a large job. For sharper output at the selected DPI, use a smaller page range.</small>
  <label className="check"><input type="checkbox" checked={settings.smoothing??true} onChange={e=>change({smoothing:e.target.checked})}/> Image smoothing</label>
  <label>Native driver DPI<select disabled={!native||!cap?.resolutions.length} value={settings.driverDpi?settings.driverDpi.x+'x'+settings.driverDpi.y:''} onChange={e=>{const [x,y]=e.target.value.split('x').map(Number);change({driverDpi:e.target.value?{x,y}:undefined})}}><option value="">Driver default</option>{cap?.resolutions.map((dpi,i)=><option key={i} value={dpi.x+'x'+dpi.y}>{dpi.x} ? {dpi.y}</option>)}</select></label>
  {(!native||!cap?.resolutions.length)&&<small>Direct resolution selection requires a physical printer that advertises resolution choices.</small>}
@@ -179,4 +179,9 @@ export function ProfessionalSettings({settings,change,capabilities:cap,refresh}:
  <Button className="secondary" disabled={!preset} onClick={()=>void window.bloom.call('setDefaultPrintPreset',{id:preset}).then(load).catch(error)}>Set default</Button>
  </div></div></details>
  </div>;
+}
+
+
+export function SkipAutoMessages({value,change,disabled}:{value:boolean;change:(value:boolean)=>void;disabled?:boolean}){
+ return <label className="check"><input type="checkbox" checked={value} disabled={disabled} onChange={e=>change(e.target.checked)}/>Skip automatic WhatsApp messages for this order</label>;
 }

@@ -1,3 +1,4 @@
+import {defaultDocumentDpi} from '../../packages/printing/raster-budget';
 import {isAutomaticDuplex,isManualDuplex} from '../../packages/printing/duplex';
 import {useQueryClient} from '@tanstack/react-query';
 import {PhotoStudio} from './photos';
@@ -5,9 +6,9 @@ import {BatchPdfStudio,type BatchPdfEditor} from './batch-pdfs';
 import type {PrinterCapabilities} from '../../packages/printing/windows';
 import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning,submissionDuplex,validateSubmissionPrinter} from '../../packages/printing/capabilities';
 import {paperNames} from '../../packages/printing/paper';
-import {BookletWizard,DocumentPricingSettings,DuplexOptions,DuplexTest,PrintEstimate,ProfessionalSettings} from './print-settings';
+import {BookletWizard,DocumentPricingSettings,DuplexOptions,DuplexTest,PrintEstimate,ProfessionalSettings,SkipAutoMessages} from './print-settings';
 import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
-import {planDocument,selectedPages,type DocumentInfo} from '../../packages/printing/plan';
+import {packsPhotoCopies,planDocument,selectedPages,type DocumentInfo} from '../../packages/printing/plan';
 import {inspectDocument,needsPixelAnalysis} from './pdf';
 import {useEffect,useId,useRef,useState,type FormEvent} from 'react';
 import {BookOpen,Files,FileText,Plus,Printer,ShoppingBag,Wallet} from 'lucide-react';
@@ -81,6 +82,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  const [popupOrder,setPopupOrder]=useState('');
  const [popupError,setPopupError]=useState('');
  const printBlockId=useId();
+ const [skipAutoMessages,setSkipAutoMessages]=useState(false);
  const [presets,setPresets]=useState<PrintPreset[]>([]);
  const [defaultPreset,setDefaultPreset]=useState<string|null>(null);
  const settingsTouched=useRef(false),submitInFlight=useRef(false);
@@ -179,7 +181,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   }catch{matchHint='Choose a valid page range to match the PDF paper size.'}
  }
  const paper=matched?.paper??manualPaper;
- const options={...baseOptions,paper,orientation:matched&&orientation==='portrait'&&advanced.orientation===undefined?'auto' as const:orientation,...(matched&&{customPaper:matched.customPaper,tray:undefined})} as const;
+ const options={...baseOptions,paper,renderDpi:advanced.renderDpi??defaultDocumentDpi(paper,matched?.customPaper??baseOptions.customPaper),orientation:matched&&orientation==='portrait'&&advanced.orientation===undefined?'auto' as const:orientation,...(matched&&{customPaper:matched.customPaper,tray:undefined})} as const;
  const paperWidth=options.customPaper?.widthMm,paperHeight=options.customPaper?.heightMm;
  const [capabilityError,setCapabilityError]=useState('');
  const [capabilityRefresh,refreshCapabilities]=useState(0);
@@ -208,12 +210,14 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   if(countsReady){
    calculations=files.map(item=>{
     const image=item.mime.startsWith('image/');
-    if(image&&(nup!==1||booklet||marginMm!==0||gapMm!==0||borders))throw new Error('PDF layout options cannot be applied to photos. Use a separate photo order.');
+    const packed=packsPhotoCopies(item.mime,options);
     const fileCopies=options.fileCopies?.[item.id]??copies;
     const plan=planDocument({...options,copies:fileCopies},infos[item.id]);
     const colourPages=[...new Set(plan.sides.flatMap(side=>side.placements.filter(p=>p.colour).map(p=>p.page)))];
-    const settings:CalculationInput={documentPages:counts[item.id],selectedPages:plan.selected,copies:fileCopies,paper,customPaper:options.customPaper,
-     mode:inkMode,colourPages,uncertainPages:plan.needsConfirmation?plan.selected.filter(page=>infos[item.id].pages[page-1].ink==='uncertain'):[],
+    const packedPages=packed?Array.from({length:fileCopies},(_,index)=>index+1):undefined;
+    const settings:CalculationInput={documentPages:packed?fileCopies:counts[item.id],selectedPages:packedPages??plan.selected,copies:plan.settings.copies,paper,customPaper:options.customPaper,
+     mode:inkMode,colourPages:packedPages&&colourPages.length?packedPages:colourPages,
+     uncertainPages:plan.needsConfirmation?(packedPages??plan.selected).filter(page=>infos[item.id].pages[(packed?1:page)-1].ink==='uncertain'):[],
      pagesPerSide:nup,duplex,signaturePages:options.signaturePages,imposition:method==='booklet'||method==='poster'?method:'ordinary',binding,
      posterTiles:method==='poster'?plan.sides.map(side=>side.placements[0].page):undefined,
      pricing:image?{basis:'sheet',mono:data.settings!.photo,colour:data.settings!.photo}:policy};
@@ -240,8 +244,10 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  if(capabilities){try{validateSubmissionPrinter(schemas.print.parse({id:active?.id??'preview',...options}),capabilities,virtualPrinter)}catch(e){driverBlock=e instanceof Error?e.message:String(e)}}
  const printerNotice=!printerListed?(printers.length?'Select an available Windows printer.':'Windows returned no printers. Add one under Windows Settings > Printers & scanners, then refresh.'):
   pdfOutput?'This printer creates a PDF file. Choose a physical printer to print on paper.':
-  driverBlock||(driverFallback?'Windows could not read detailed capabilities. This one-sided document can use driver defaults.':!capabilities?'Checking Windows printer capabilities.':supplyWarning||(virtualPrinter?'This virtual printer can open a Windows dialog or another app.':''));
+  driverBlock||(driverFallback?'Windows could not read detailed capabilities. This document can print with the selected driver.':!capabilities?'Checking Windows printer capabilities.':supplyWarning||(virtualPrinter?'This virtual printer can open a Windows dialog or another app.':''));
  const printBlock=batchEditor?'':active?.status==='Cancelled'?'Reopen the cancelled order before printing.':!printerListed||!pdfOutput&&(driverBlock||!capabilities&&!driverFallback)?printerNotice:'';
+ const messageCustomer=active?active.customer_id:preview?.customer_id;
+ useEffect(()=>setSkipAutoMessages(active?.skipAutoMessages??false),[messageCustomer,active?.id,active?.skipAutoMessages]);
  const formReady=!!preview&&countsReady&&pricingReady&&!!calculation&&!calculationError&&!countError&&(!popupOrder||!!active);
  function resetDefaults(){
   const preset=presets.find(item=>item.id===defaultPreset);
@@ -262,12 +268,12 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   try{
    if(batchEditor){batchEditor.apply(normalizedSettings(options));return}
    if(!id){
-    id=await window.bloom.call('order',{customer:preview.customer_id,files:[preview.id],copies,paper,colour,price:0,discount:reduction,charge:extra,calculations,printSettings:options});
+    id=await window.bloom.call('order',{customer:preview.customer_id,files:[preview.id],copies,paper,colour,price:0,discount:reduction,charge:extra,calculations,printSettings:options,skipAutoMessages});
     if(attachmentId)setPopupOrder(id);else state.set({job:id});
    }
    if(saveOnly){await refresh();return}
    if(pdfOutput){await window.bloom.call('savePrintPdf',{id,...options});await refresh();return}
-   await window.bloom.call('print',{id,...options});
+   await window.bloom.call('print',{id,...options,skipAutoMessages});
    localStorage.setItem('lastDocumentPrinter',printer);
    state.set({pdfPrintAttachment:'',view:'Print Queue',job:id});
    await refresh();
@@ -288,21 +294,26 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  {calculation&&<div className="print-calculation-summary" aria-live="polite"><div><small>Selected pages</small><strong>{calculation.selectedPages}</strong></div><div><small>Printed sides</small><strong>{calculation.printedSides}</strong></div><div><small>Physical sheets</small><strong>{calculation.totalPhysicalSheets}</strong></div><div><small>Blank sides</small><strong>{calculation.blankSides}</strong></div><div><small>Colour sides</small><strong>{calculation.colourSides}</strong></div><div><small>Black &amp; white sides</small><strong>{calculation.blackAndWhiteSides}</strong></div><div><small>Estimate</small><strong>{money(estimatedTotal)}</strong></div></div>}
  {calculation&&files.length>1&&<Table headers={['File','Pages','Sheets','Estimate']}>{calculation.files.map(item=><tr key={item.id}><td>{files.find(file=>file.id===item.id)?.name}</td><td>{item.calculation.selectedPages}</td><td>{item.calculation.totalPhysicalSheets}</td><td>{money(item.calculation.finalTotal)}</td></tr>)}</Table>}
  </Panel>}
- <Panel className="document-print-settings"><form className="stack" onSubmit={submit} onChangeCapture={()=>{settingsTouched.current=true}}><div inert={saving} className={attachmentId&&!batchEditor?"stack quick-pdf-settings-scroll":"stack"}>{!batchEditor&&<h2>Print settings</h2>}
+ <Panel className="document-print-settings"><form className="stack" onSubmit={submit} onChangeCapture={()=>{settingsTouched.current=true}}><div inert={saving} className={batchEditor?"stack":"stack document-print-settings-scroll"}>{!batchEditor&&<h2>Print settings</h2>}
  <div className="form-grid">
  <label>Paper<select value={paper} disabled={!!matched} onChange={e=>{const value=e.target.value as typeof paper;setPaper(value);if(value==='Custom'&&!advanced.customPaper)setAdvanced(prior=>({...prior,customPaper:{widthMm:210,heightMm:297}}))}}>{paperNames.map(value=><option key={value}>{value}</option>)}</select></label>
  <label>Copies<input type="number" min="1" max="100" required value={copies} onChange={e=>setCopies(Number(e.target.value))}/></label>
  <label>Ink<select value={advanced.ink==='grayscale'?'grayscale':colour?'colour':'mono'} onChange={e=>{const value=e.target.value;setColour(value==='colour');setAdvanced(prior=>({...prior,ink:value==='grayscale'?'grayscale':'legacy'}))}}><option value="mono">Black &amp; white</option><option value="grayscale">Grayscale</option><option value="colour">Colour</option></select></label>
 </div>
  {manualPaper==='Custom'&&!matched&&<div className="form-grid">{(['widthMm','heightMm'] as const).map(key=><label key={key}>{key==='widthMm'?'Paper width (mm)':'Paper height (mm)'}<input type="number" min="20" max="2000" value={options.customPaper?.[key]??(key==='widthMm'?210:297)} onChange={e=>setAdvanced(prior=>({...prior,customPaper:{widthMm:210,heightMm:297,...prior.customPaper,[key]:Number(e.target.value)}}))}/></label>)}</div>}
- <label>Printer<PrinterSelect value={printer} change={setPrinter} labelOutput/></label>
+ <label>Printer<PrinterSelect value={printer} change={value=>{
+  if(value===printer)return;
+  setCapabilities(undefined);setCapabilityError('');
+  setAdvanced(prior=>({...prior,tray:undefined,driverDpi:undefined}));
+  setPrinter(value);
+ }} labelOutput/></label>
  {preview?.mime==='application/pdf'&&<div className="quick-print-types" role="group" aria-label="Print type">
   <Button className="secondary" aria-pressed={quickHandling==='size'&&!twoSided} onClick={()=>{selectPagesPerSide(1);setDuplex('simplex')}}><FileText size={15}/> Normal document</Button>
   <Button className="secondary" aria-pressed={quickHandling==='multiple'} onClick={()=>selectPagesPerSide(nup>1?nup:2)}><Files size={15}/> Multiple pages</Button>
   <Button className="secondary" aria-pressed={twoSided&&!booklet} onClick={()=>{selectPagesPerSide(1);if(duplex==='simplex')setDuplex('auto')}}><Files size={15}/> Double-sided</Button>
   <Button className="secondary" aria-pressed={booklet} onClick={()=>{settingsTouched.current=true;setWizard(true)}}><BookOpen size={15}/> Booklet</Button>
  </div>}
- {quickHandling==='multiple'&&<PageLayoutChoices value={nup} change={selectPagesPerSide} landscape={landscape}/>}
+ {quickHandling==='multiple'&&<PageLayoutChoices value={nup} change={selectPagesPerSide} landscape={landscape} copies={preview?.mime.startsWith('image/')}/>}
  {booklet&&<small className="booklet-fold-preview"><BookOpen size={22}/> Fold each sheet in half after printing both sides.</small>}
  <div className="actions document-duplex-controls">
   <label>Orientation<select aria-label="Orientation" disabled={booklet} value={options.orientation} onChange={e=>{setLandscape(e.target.value==='landscape');setAdvanced(prior=>({...prior,orientation:e.target.value as typeof orientation}))}}><option value="portrait">Portrait</option><option value="landscape">Landscape</option><option value="auto" disabled={booklet||advanced.scaling==='printable'}>Auto by first selected page</option></select></label>
@@ -343,7 +354,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
    <label>Poster scale (%)<input type="number" min={10} max={1000} value={advanced.poster.scale??200} onChange={event=>setAdvanced(prior=>({...prior,poster:{...prior.poster,scale:Number(event.target.value)}}))}/></label>
    <label>Tile overlap (mm)<input type="number" min={0} max={40} value={advanced.poster.overlapMm??5} onChange={event=>setAdvanced(prior=>({...prior,poster:{...prior.poster,overlapMm:Number(event.target.value)}}))}/></label>
   </div>}
-  {quickHandling==='multiple'&&<label>Pages per side<select value={nup} onChange={e=>{setNup(Number(e.target.value) as typeof nup);setBooklet(false);setAdvanced(prior=>({...prior,grid:undefined,poster:undefined,documentFrame:undefined,handoutNotes:false}))}}>{[...new Set([1,2,3,4,6,8,9,12,16,nup])].sort((a,b)=>a-b).map(value=><option key={value}>{value}</option>)}</select></label>}
+  {quickHandling==='multiple'&&<label>Pages per side<select value={nup} onChange={e=>selectPagesPerSide(Number(e.target.value))}>{[...new Set([1,2,3,4,6,8,9,12,16,nup])].sort((a,b)=>a-b).map(value=><option key={value}>{value}</option>)}</select></label>}
   <label className="check"><input type="checkbox" checked={matchPdfPaper&&canMatch} disabled={!canMatch} onChange={event=>setMatchPdfPaper(event.target.checked)}/> Match paper to PDF page size</label>
   <small>{matchHint||'Available for one PDF at 1 page per side. Uses the default printer tray for the matched paper size.'}</small>
   <details><summary>Page Setup</summary><div className="stack">
@@ -359,7 +370,8 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   <li><strong>Two-sided.</strong> Four pages at 1 page per side use 4 sheets one-sided or 2 sheets two-sided. Long edge usually flips a portrait document like a book.</li>
   <li><strong>Pages per side.</strong> Choose 2 to put four pages onto two printed sides. Scaling, margins, ink processing, and driver controls are available below.</li>
  </ul></details>}
- {!attachmentId&&preview?.mime!=='application/pdf'&&<label>Pages per side<select value={nup} onChange={e=>{setNup(Number(e.target.value) as typeof nup);setBooklet(false);setAdvanced(prior=>({...prior,grid:undefined,poster:undefined,documentFrame:undefined,handoutNotes:false}))}}>{[...new Set([1,2,3,4,6,8,9,12,16,nup])].sort((a,b)=>a-b).map(value=><option key={value}>{value}</option>)}</select></label>}
+ {preview?.mime.startsWith('image/')&&<Button className="secondary" onClick={()=>state.set({view:'Print Studio',job:active?.id??'',customer:preview.customer_id??'',photoStudio:true,photoDraft:[preview.id],pdfPrintAttachment:''})}>Set exact photo size on A4</Button>}
+ {!attachmentId&&preview?.mime.startsWith('image/')&&<label>Copies per side<select value={nup} onChange={e=>selectPagesPerSide(Number(e.target.value))}>{[...new Set([1,2,3,4,6,8,9,12,16,nup])].sort((a,b)=>a-b).map(value=><option key={value}>{value}</option>)}</select></label>}
 
  <div>
  <details><summary>Presentation handouts</summary><div className="stack">
@@ -397,6 +409,7 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  <p className="subtle">Paper and duplex support depend on the Windows driver. Confirm physical completion in Print Queue.</p>
  {popupError&&<p role="alert">{popupError}</p>}
  </div><div className="print-sticky-actions">
+ <div className="print-action-details">
  {attachmentId&&active&&<small role="status">Order {active.id} saved</small>}
  {!batchEditor&&<PrintEstimate subtotal={calculation?.finalTotal} total={active?.total??(calculation?estimatedTotal:undefined)} label={active?'Order total':'Estimated total'}
   adjustments={active?.printSettings?.orderAdjustments} editable={!active?{charge,discount,setCharge,setDiscount,disabled:saving}:undefined}/>}
@@ -404,9 +417,11 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
  {pricingError?<Button className="quiet" onClick={()=>void loadPricing()}>Retry loading prices</Button>:!pricingReady&&<small role="status">Loading shop prices...</small>}
  {!batchEditor&&(printBlock||printerNotice)&&<small role="status" id={printBlockId}>{printBlock||printerNotice}</small>}
  {printBlock&&<Button className="quiet" onClick={refreshPrinters}>Refresh printers</Button>}
+ {!batchEditor&&!pdfOutput&&messageCustomer&&<SkipAutoMessages value={skipAutoMessages} change={setSkipAutoMessages} disabled={saving}/>}
  <PrinterPropertiesButton printer={printer} disabled={saving} onClose={()=>refreshCapabilities(value=>value+1)}/>
- <Button type="submit" aria-describedby={!batchEditor&&(printBlock||printerNotice)?printBlockId:undefined} aria-busy={saving} disabled={saving||!formReady||!!printBlock} title="දැන් Print කරන්න"><Printer size={17}/>{batchEditor?'Apply settings to this PDF':pdfOutput?'Save PDF':'Print Now'}</Button>
  {!active&&!batchEditor&&<Button className="quiet" disabled={!formReady||saving} onClick={()=>void submit(undefined,true)}>Save order for later</Button>}
+ </div>
+ <Button type="submit" aria-describedby={!batchEditor&&(printBlock||printerNotice)?printBlockId:undefined} aria-busy={saving} disabled={saving||!formReady||!!printBlock} title="දැන් Print කරන්න"><Printer size={17}/>{batchEditor?'Apply settings to this PDF':pdfOutput?'Save PDF':'Print Now'}</Button>
  </div>
  </form></Panel></div>;
 }

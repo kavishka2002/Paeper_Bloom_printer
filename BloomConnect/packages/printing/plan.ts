@@ -105,6 +105,9 @@ export function tightPhotoFrame(source:PageInfo,placement:Placement,settings:Pri
   const borderX=(frame.width-placement.box.width)/2,borderY=(frame.height-placement.box.height)/2;
   return {x:image.x-borderX,y:image.y-borderY,width:image.width+2*borderX,height:image.height+2*borderY,rotation};
 }
+export function packsPhotoCopies(mime:string,settings:Pick<PrintSettingsInput,'nup'|'layout'|'photo'>){
+  return mime.startsWith('image/')&&(settings.nup??1)>1&&settings.layout==='single'&&!settings.photo;
+}
 export function planDocument(raw:PrintSettingsInput,doc:DocumentInfo):DocumentPlan{
   const s=normalizedSettings(raw),selected=selectedPages(s,doc),[width,height]=orientedPaper(s,doc.pages[selected[0]-1]);
   if(width*height*(s.renderDpi/25.4)**2>20000000)throw new Error('This paper and raster DPI exceed the safe 20 megapixel limit. Choose a lower rendering DPI.');
@@ -124,6 +127,17 @@ export function planDocument(raw:PrintSettingsInput,doc:DocumentInfo):DocumentPl
   let photoCount=0;
   if(isPhoto){
     if(s.booklet||s.poster?.enabled||s.handoutNotes)throw new Error('Booklet, handout and poster modes require a document.');
+    if(packsPhotoCopies(doc.mime,s)){
+      const [columns,rows]=gridShape(s,width,height);
+      photoCount=s.copies;
+      for(let start=0;start<photoCount;start+=s.nup){
+        add(Array.from({length:Math.min(s.nup,photoCount-start)},(_,slot)=>({
+          page:1,rotation:s.rotation,colour:colour(1),fit:s.fit,box:cellBox(slot,columns,rows,area,s.gapMm,s.order)
+        })),undefined,true);
+      }
+      if(s.duplex!=='simplex'&&sides.length%2)add([]);
+      return {sides,selected,settings:{...s,copies:1},needsConfirmation,photoCount,logicalPages:1};
+    }
     const requested=s.photo;
     const pw=requested?.widthMm??(s.layout==='passport'?35:area.width/(s.layout==='four'?2:1));
     const ph=requested?.heightMm??(s.layout==='passport'?45:area.height/(s.layout==='single'?1:s.layout==='four'?2:3));

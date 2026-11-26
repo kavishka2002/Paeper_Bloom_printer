@@ -121,6 +121,19 @@ test('engine validates inputs, imports and deduplicates, persists billing and cr
   const originalPreview=await engine.call('getPreview',{id:file});
   assert.equal(originalPreview.mime,'image/png');
   assert.deepEqual(Buffer.from(originalPreview.bytes),png);
+  const crops=await engine.call('createPhotoCrops',{id:file,crops:[
+   {x:0,y:0,width:.25,height:.5},{x:.5,y:.25,width:.5,height:.75}
+  ]});
+  for(const [index,crop] of crops.entries()){
+   const preview=await engine.call('getPreview',{id:crop});
+   const {width,height}=await require('sharp')(Buffer.from(preview.bytes)).metadata();
+   assert.deepEqual([width,height],index===0?[80,80]:[160,120]);
+  }
+  const cropFiles=(await engine.call('snapshot',null)).attachments.filter(item=>crops.includes(item.id));
+  assert.equal(cropFiles.length,2);
+  assert.ok(cropFiles.every(item=>item.customer_id===customer&&item.status==='Ready'));
+  assert.deepEqual(Buffer.from((await engine.call('getPreview',{id:file})).bytes),png);
+  await assert.rejects(engine.call('createPhotoCrops',{id:file,crops:[{x:.8,y:0,width:.5,height:1}]}),/within the original photo/);
   const order={files:[file],copies:2,paper:'A4',colour:false,price:1200,discount:100,charge:200};
   await assert.rejects(engine.call('order',{...order,customer:null}),/same customer/);
   const id=await engine.call('order',{...order,customer});
@@ -293,6 +306,24 @@ test('signed Cloud events produce one customer, media record, automatic order an
   assert.equal((await fetch(endpoint,{method:'POST',body:staleBody,headers:{'x-hub-signature-256':staleSignature}})).status,200);
   const staleCustomer=(await engine.call('snapshot',null)).customers.find(c=>c.phone==='15555550124');
   await assert.rejects(engine.call('reply',{id:staleCustomer.id,text:'Received.'}),/Meta Cloud API reply window has expired/);
+  await engine.call('rule',{id:'delayed-ready',name:'Delayed ready',trigger:'ready-to-print',keyword:'',actions:['reply'],text:'Preparing {job_id}',debounceSeconds:300,enabled:true,graph:''});
+  for(const skipAtCreation of [true,false]){
+   const order=await engine.call('order',{customer:state.customers[0].id,files:[state.attachments[0].id],copies:1,paper:'A4',colour:false,price:1000,discount:0,charge:0,skipAutoMessages:skipAtCreation});
+   if(!skipAtCreation){
+    await engine.call('stage',{id:order,status:'Ready to Print'});
+    const delayed=(await engine.call('notificationLog',null)).find(item=>item.rule_id==='delayed-ready'&&item.event_key==='ready-to-print:'+order);
+    assert.equal(delayed?.status,'Pending');
+   }
+   const entry=await engine.call('printStart',{id:order,printer:'Fixture only',skipAutoMessages:true});
+   await engine.call('printFinish',{id:entry,error:'',partial:false});
+   await engine.call('queue',{id:entry,status:'Completed'});
+   const snapshot=await engine.call('snapshot',null);
+   assert.equal(snapshot.jobs.find(item=>item.id===order).skipAutoMessages,true);
+   assert.equal(snapshot.jobs.find(item=>item.id===order).status,'Ready for Pickup');
+   const log=(await engine.call('notificationLog',null)).filter(item=>item.event_key.endsWith(':'+order));
+   assert.equal(log.some(item=>['print-queued','print-completed','pickup'].includes(item.event_key.split(':')[0])),false);
+   if(!skipAtCreation)assert.equal(log.find(item=>item.rule_id==='delayed-ready')?.status,'Cancelled');
+  }
   await engine.call('logout',null);
   await assert.rejects(engine.call('reply',{id:state.customers[0].id,text:'Received.'}),/offline/);
  }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
@@ -751,6 +782,27 @@ test('bulk photo settings, mixed PDF/photo order and reprint snapshots preserve 
   assert.equal(saved.jobs.find(j=>j.id===id).printSettings.photoItems[photos[0].id].quantity,3);
   assert.equal(saved.jobs.find(j=>j.id===id).total,18000);assert.equal(saved.queue.length,3);
   assert.equal(JSON.parse(saved.queue[0].settings).photoItems[photos[1].id].widthMm,50.8);
+ }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
+});
+
+test('six copies of one image save as one six-up sheet and submit through the queue',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bloom-photo-copies-'));
+ const engine=start(root);
+ try{
+  const path=join(root,'photo.png');
+  await writeFile(path,await require('sharp')({create:{width:20,height:20,channels:3,background:'blue'}}).png().toBuffer());
+  await engine.call('importLocal',{paths:[path],customer:null});
+  const file=(await engine.call('snapshot',null)).attachments[0];
+  const printSettings={printer:'Fixture only',paper:'A4',copies:6,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single',nup:6};
+  const settings={documentPages:6,selectedPages:[1,2,3,4,5,6],copies:1,pagesPerSide:6,paper:'A4',duplex:'simplex',imposition:'ordinary',pricing:{basis:'sheet',mono:1000,colour:1000}};
+  const order={customer:null,files:[file.id],copies:6,paper:'A4',colour:false,price:0,discount:0,charge:0,printSettings};
+  await assert.rejects(engine.call('order',{...order,calculations:[{id:file.id,settings:{...settings,selectedPages:[1]}}]}),/every requested copy/);
+  const id=await engine.call('order',{...order,calculations:[{id:file.id,settings}]});
+  const entry=await engine.call('printStart',{...printSettings,id});
+  await engine.call('printFinish',{id:entry,error:'',partial:false});
+  const snapshot=await engine.call('snapshot',null);
+  assert.equal(snapshot.jobs.find(job=>job.id===id).total,1000);
+  assert.equal(snapshot.queue.find(item=>item.id===entry).status,'Submitted');
  }finally{await engine.stop();await rm(root,{recursive:true,force:true})}
 });
 

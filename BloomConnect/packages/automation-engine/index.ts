@@ -4,7 +4,7 @@ import {convertOfficeDocument,officeDocument,officeExtensions} from '../printing
 import {Worker} from 'node:worker_threads';
 import {scanSettingsSchema,type ScanPreview} from '../shared/scan';
 import type {ScanWork} from '../printing/scan-worker';
-import {planPhotos,type DocumentInfo} from '../printing/plan';
+import {packsPhotoCopies,planPhotos,type DocumentInfo} from '../printing/plan';
 import {defaultPresets} from '../printing/presets';
 import {calculatePrint,calculateBulk} from '../printing/calculation';
 import {batchPdfFileSchema} from '../printing/settings';
@@ -121,6 +121,13 @@ let nextDownloadSlot=0;
 const printFiles=(id:string)=>rows<{attachment_id:string}>('SELECT attachment_id FROM print_job_files WHERE job_id=? ORDER BY rowid',id).map(x=>x.attachment_id);
 const jobQuery='SELECT j.*,COALESCE((SELECT SUM(amount) FROM payments WHERE job_id=j.id),0) AS paid FROM print_jobs j';
 const attachmentFields='id,customer_id,message_id,name,mime,status,created,bytes';
+const skipsAutoMessages=(id:string)=>store.setting<boolean>('skipAutoMessages:'+id)===true;
+function setAutoMessagePreference(id:string,skip:boolean){
+  store.save('skipAutoMessages:'+id,skip);
+  if(skip){
+    run("UPDATE notification_outbox SET status='Cancelled',error='Automatic WhatsApp messages are disabled for this order' WHERE status='Pending' AND (substr(event_key,instr(event_key,':')+1)=? OR substr(event_key,instr(event_key,':')+1) LIKE ?)",id,id+':%');
+  }
+}
 function job(id:string){const data=row<Job>(jobQuery+' WHERE j.id=?',id);if(!data)throw new Error('Order not found.');return data}
 // Older versions always submitted every order file. Retain that historical selection explicitly.
 for(const legacy of rows<{id:string;job_id:string;settings:string|null}>('SELECT id,job_id,settings FROM print_queue')){
@@ -146,7 +153,7 @@ function snapshot():Snapshot{
     ?rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages WHERE account_id=? ORDER BY created',activeAccount)
     :connection.mode==='web'?[]:rows('SELECT id,customer_id,body,kind,direction,status,created,unread FROM messages ORDER BY created'),
   attachments:rows<Attachment>('SELECT '+attachmentFields+' FROM attachments ORDER BY created DESC').map(file=>({...file,download:downloadStatus.get(file.id)})),
-  jobs:rows<Job>(jobQuery+' ORDER BY j.id DESC').map(j=>({...j,files:printFiles(j.id),printSettings:JSON.parse(row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',j.id)?.settings??'null')??undefined,calculations:rows<{attachment_id:string;input:string;result:string}>('SELECT * FROM print_calculations WHERE job_id=?',j.id).map(c=>({id:c.attachment_id,settings:JSON.parse(c.input),result:JSON.parse(c.result)}))})),
+  jobs:rows<Job>(jobQuery+' ORDER BY j.id DESC').map(j=>({...j,skipAutoMessages:skipsAutoMessages(j.id),files:printFiles(j.id),printSettings:JSON.parse(row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',j.id)?.settings??'null')??undefined,calculations:rows<{attachment_id:string;input:string;result:string}>('SELECT * FROM print_calculations WHERE job_id=?',j.id).map(c=>({id:c.attachment_id,settings:JSON.parse(c.input),result:JSON.parse(c.result)}))})),
   payments:rows('SELECT * FROM payments ORDER BY created DESC'),queue:rows('SELECT * FROM print_queue ORDER BY created DESC'),
   rules:automationRules(),
   activity:rows('SELECT * FROM activity_logs ORDER BY id DESC LIMIT 300'),connection
@@ -181,7 +188,11 @@ function createOrder(input:Input<'order'>){
     for(const item of calculations){
       const settings=item.settings;
       const fileOptions=batch?.[item.id]??options;
-      if(settings.copies!==(batch?fileOptions.copies:options.fileCopies?.[item.id]??options.copies)||settings.paper!==fileOptions.paper||settings.pagesPerSide!==(fileOptions.nup??1)||settings.duplex!==fileOptions.duplex||settings.imposition!==(fileOptions.booklet?'booklet':fileOptions.poster?.enabled?'poster':'ordinary')||(fileOptions.booklet&&settings.signaturePages!==fileOptions.signaturePages))throw new Error('Calculated settings must match the saved print configuration.');
+      const copies=batch?fileOptions.copies:options.fileCopies?.[item.id]??options.copies;
+      const attachment=row<{mime:string}>('SELECT mime FROM attachments WHERE id=?',item.id)!;
+      const packed=!batch&&packsPhotoCopies(attachment.mime,options);
+      if(packed&&(settings.documentPages!==copies||settings.selectedPages?.length!==copies))throw new Error('Photo calculation must include every requested copy.');
+      if(settings.copies!==(packed?1:copies)||settings.paper!==fileOptions.paper||settings.pagesPerSide!==(fileOptions.nup??1)||settings.duplex!==fileOptions.duplex||settings.imposition!==(fileOptions.booklet?'booklet':fileOptions.poster?.enabled?'poster':'ordinary')||(fileOptions.booklet&&settings.signaturePages!==fileOptions.signaturePages))throw new Error('Calculated settings must match the saved print configuration.');
     }
   }
   const estimate=calculations?calculateBulk(calculations.map(item=>({...item,customer:input.customer}))):undefined;
@@ -194,6 +205,7 @@ function createOrder(input:Input<'order'>){
   if(input.printSettings)run('INSERT INTO print_order_config VALUES (?,?)',id,JSON.stringify({...input.printSettings,
     orderAdjustments:calculations&&(input.charge||input.discount)?{charge:input.charge,discount:input.discount}:undefined}));
   if(photoSnapshot)store.save('photoLayout:'+id,photoSnapshot);
+  if(input.customer&&input.skipAutoMessages!==undefined)setAutoMessagePreference(id,input.skipAutoMessages);
   store.audit('Order created',id);queueMicrotask(()=>void automation({id,jobId:id,kind:'order-created',customer:input.customer}));return id;
 }
 async function identify(bytes:Buffer,name:string){
@@ -360,7 +372,7 @@ async function automation(event:Event){
         }
         if(action==='notify')store.audit('Operator notification',rule.text||rule.name);
         if(action==='label'&&event.customer)run('UPDATE customers SET tag=? WHERE id=?',rule.text.slice(0,120),event.customer);
-        if(action==='reply'){
+        if(action==='reply'&&!(event.jobId&&skipsAutoMessages(event.jobId))){
           if(!event.customer||!rule.text)throw new Error('A customer and reply text are required.');
           const order=event.jobId?job(event.jobId):undefined;
           const values:Record<string,string>={
@@ -825,6 +837,31 @@ const handlers:HandlerMap={
       return converted;
     }finally{inflight.delete(id)}
   },
+  async createPhotoCrops({id,crops}){
+    const source=readyFile(id);
+    if(!source.mime.startsWith('image/'))throw new Error('Select a ready photo to crop.');
+    const {data,info}=await sharp(join(mediaDir,source.path),{limitInputPixels:40_000_000})
+      .autoOrient().toColourspace('srgb').raw().toBuffer({resolveWithObject:true});
+    const created:string[]=[];
+    try{
+      for(const [index,crop] of crops.entries()){
+        const left=Math.floor(crop.x*info.width),top=Math.floor(crop.y*info.height);
+        const width=Math.min(info.width,Math.ceil((crop.x+crop.width)*info.width))-left;
+        const height=Math.min(info.height,Math.ceil((crop.y+crop.height)*info.height))-top;
+        const bytes=await sharp(data,{raw:{width:info.width,height:info.height,channels:info.channels}})
+          .extract({left,top,width,height}).png().toBuffer();
+        const copy=randomUUID(),name=source.name.replace(/\.[^.]+$/,'').slice(0,150)+' (crop '+(index+2)+').png';
+        run("INSERT INTO attachments (id,customer_id,name,status,created) VALUES (?,?,?,'Pending',?)",copy,source.customer_id,name,now());
+        created.push(copy);
+        await saveMedia(copy,bytes);
+      }
+    }catch(error){
+      store.atomic(()=>{for(const copy of created)run('DELETE FROM attachments WHERE id=?',copy)});
+      throw error;
+    }
+    store.audit('Photo crops saved',source.name+' · '+created.length);
+    return created;
+  },
   async scanPreview({id,token,settings}){
     const source=readyFile(id);
     if(!source.mime.startsWith('image/'))throw new Error('Select a ready photo to scan.');
@@ -937,8 +974,10 @@ const internal:Record<string,(input:never)=>unknown>={
   },
   printable({id}:{id:string}){job(id);return printFiles(id).map(id=>{const a=readyFile(id);return {mime:a.mime,path:join(mediaDir,a.path),name:a.name,id}})},
   printStart(input:Input<"print">){return store.atomic(()=>{
-    const {id,printer}=input;
-    if(job(id).status==='Cancelled')throw new Error('Reopen the cancelled order before printing.');
+    const {id,printer,skipAutoMessages:requestedPreference,...printOptions}=input;
+    const order=job(id);
+    if(order.status==='Cancelled')throw new Error('Reopen the cancelled order before printing.');
+    const skipAutoMessages=schemas.print.shape.skipAutoMessages.parse(requestedPreference);
     const files=printFiles(id),selection=input.fileSelection??files;
     if(new Set(selection).size!==selection.length||selection.some(file=>!files.includes(file)))throw new Error('Print selected files from this order only.');
     const config=row<{settings:string}>('SELECT settings FROM print_order_config WHERE job_id=?',id);
@@ -955,8 +994,9 @@ const internal:Record<string,(input:never)=>unknown>={
       const submitted=JSON.parse(entry.settings??'null')?.fileSelection??files;
       return selection.some(file=>submitted.includes(file));
     }))throw new Error('Confirm or close the existing printer submission before printing this order again.');
+    if(order.customer_id&&skipAutoMessages!==undefined)setAutoMessagePreference(id,skipAutoMessages);
     const entry=randomUUID();
-    run("INSERT INTO print_queue (id,job_id,printer,status,created,settings) VALUES (?,?,?,'Printing',?,?)",entry,id,printer,now(),JSON.stringify({...input,fileSelection:selection}));
+    run("INSERT INTO print_queue (id,job_id,printer,status,created,settings) VALUES (?,?,?,'Printing',?,?)",entry,id,printer,now(),JSON.stringify({id,printer,...printOptions,fileSelection:selection}));
     return entry;
   })},
   async printFinish({id,error,partial,cancelled}:{id:string;error:string;partial:boolean;cancelled?:boolean}){

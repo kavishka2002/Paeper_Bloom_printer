@@ -333,8 +333,13 @@ tbody tr:hover {background:var(--soft)}
  .studio-workspace.photo-studio-workspace {grid-template-columns:minmax(0,1fr)}
  .photo-selection-panel .photo-library {max-height:32vh}
 }
-.document-print-settings {max-height:calc(100vh - 138px);overflow-y:auto;overscroll-behavior:contain}
-.document-print-settings .print-sticky-actions {position:sticky;bottom:0;display:grid;gap:6px;padding:8px 0;background:var(--surface);z-index:2}
+.document-print-settings {max-height:calc(100vh - 138px);overflow:hidden}
+.document-print-settings>form {max-height:calc(100vh - 174px);grid-template-rows:minmax(0,1fr) auto}
+.document-print-settings-scroll {min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:2px 8px 4px 2px}
+.batch-inline-editor .document-print-settings>form {max-height:none}
+.document-print-settings .print-sticky-actions {position:sticky;bottom:0;display:grid;grid-template-rows:minmax(0,1fr) auto;max-height:45vh;gap:6px;padding:8px 0;background:var(--surface);z-index:2}
+.document-print-settings .print-action-details {display:grid;gap:6px;overflow:auto;overscroll-behavior:contain}
+.batch-inline-editor .print-sticky-actions {max-height:none}
 .document-print-settings .print-sticky-actions>.button {width:100%}
 .document-duplex-controls {flex-wrap:wrap}
 .document-duplex-controls>label {flex:1 1 130px;min-width:0}
@@ -466,7 +471,6 @@ dialog[aria-label="PDF Print Preview"][open] {animation:quick-pdf-enter 180ms ea
 }
 .quick-pdf-workspace .document-print-settings {overflow:hidden}
 .quick-pdf-workspace .document-print-settings>form {max-height:calc(94vh - 122px);grid-template-rows:minmax(0,1fr) auto}
-.quick-pdf-settings-scroll {overflow:auto;overscroll-behavior:contain;padding:2px 8px 4px 2px;min-height:0;scrollbar-gutter:stable}
 .quick-pdf-workspace .print-sticky-actions {position:static;border-top:1px solid var(--line);padding-bottom:0}
 .quick-pdf-handling {display:grid;grid-template-columns:repeat(auto-fit,minmax(62px,1fr));gap:6px}
 .quick-print-types,.page-layout-choices {display:grid;grid-template-columns:repeat(auto-fit,minmax(95px,1fr));gap:6px}
@@ -505,6 +509,12 @@ dialog[aria-label="PDF Print Preview"][open] {animation:quick-pdf-enter 180ms ea
 .photo-selected-card>button:first-child {min-width:0}
 .photo-selected-card span {display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .photo-selected-card .file-thumbnail {width:100%;height:72px}
+.photo-charge-fields {max-width:390px}
+.photo-crop-surface {position:relative;justify-self:center;max-width:100%;overflow:hidden;touch-action:none;user-select:none;cursor:crosshair}
+.photo-crop-surface img {display:block;width:auto;height:auto;max-width:100%;max-height:48vh}
+.photo-crop-region {position:absolute;pointer-events:none;border:2px solid white;background:#086a5160;color:white;font-weight:700;padding:2px}
+.photo-crop-region.current {box-shadow:0 0 0 200vmax #10182080;background:transparent;padding:0}
+.photo-crop-fields {grid-template-columns:repeat(auto-fit,minmax(100px,1fr))}
 .dashboard-quick-actions {display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:7px}
 .dashboard-quick-actions .button {justify-content:flex-start}
 .photo-size-choices {display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
@@ -512,7 +522,7 @@ dialog[aria-label="PDF Print Preview"][open] {animation:quick-pdf-enter 180ms ea
 .photo-size-sample {display:inline-block;height:20px;border:1px solid currentColor;border-radius:2px;background:var(--soft)}
 @media(max-width:700px) {
  .quick-pdf-workspace .document-print-settings>form {max-height:none}
- .quick-pdf-settings-scroll {overflow:visible;padding:0}
+ .quick-pdf-workspace .document-print-settings-scroll {overflow:visible;padding:0}
 }
 .studio-pdf-cards {display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:12px}
 .studio-pdf-card {display:grid;gap:8px;text-align:left;color:var(--text);cursor:pointer}

@@ -1,4 +1,4 @@
-import {isAutomaticDuplex,type DuplexMode} from './duplex';
+import {isAutomaticDuplex,isManualDuplex,type DuplexMode} from './duplex';
 import type {PrintSettings,PrintSettingsInput} from './settings';
 import type {PrinterCapabilities} from './windows';
 import {paperDimensions} from './paper';
@@ -24,18 +24,15 @@ export function validateSubmissionPrinter(settings:PrintSettings,capabilities:Pr
 export function printerSupplyWarning(code:number){
   return code===3?'The printer reports low paper.':code===5?'The printer reports low toner.':'';
 }
-function canUseDriverDefaults(s:PrintSettingsInput){
-  return s.paper!=='Custom'&&s.duplex==='simplex'&&s.tray===undefined&&!s.driverDpi&&s.scaling!=='printable'&&!s.photoBatch&&!Object.keys(s.photoItems??{}).length;
-}
 export function canPrintWithoutCapabilities(s:PrintSettingsInput){
-  return canUseDriverDefaults(s)&&(s.ink==='mono'||s.ink==='grayscale'||(s.ink??'legacy')==='legacy'&&!s.colour);
+  return s.paper!=='Custom'&&(s.duplex==='simplex'||isManualDuplex(s.duplex))&&s.tray===undefined&&!s.driverDpi&&s.scaling!=='printable'&&!s.photoBatch&&!Object.keys(s.photoItems??{}).length;
 }
 export function validatePrinter(s:PrintSettings,c:PrinterCapabilities){
   if(c.name!==s.printer)throw new Error('Printer capability data does not match this printer.');
   if(c.offline||c.status===7)throw new Error('The selected printer is offline.');
   if(c.error>2&&!printerSupplyWarning(c.error))throw new Error('The selected printer reports an error (Windows code '+c.error+').');
   const [w,h]=paperDimensions(s.paper,s.customPaper);
-  const defaultPaperAllowed=!c.papers.length&&canUseDriverDefaults(s);
+  const defaultPaperAllowed=!c.papers.length&&canPrintWithoutCapabilities(s);
   if(!defaultPaperAllowed&&!c.papers.some(p=>Math.abs(p.widthMm-w)<1.1&&Math.abs(p.heightMm-h)<1.1))throw new Error('This paper size is not advertised by the driver. Choose a supported paper size or save as PDF.');
   if(isVirtualPrinter(c.driver)||isVirtualPrinter(c.name)){
     if(s.duplex!=='simplex')throw new Error('Choose a physical printer for two-sided printing, or export the prepared PDF.');
