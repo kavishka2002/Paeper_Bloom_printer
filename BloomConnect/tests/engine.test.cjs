@@ -412,13 +412,15 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   assert.equal((await engine.call('snapshot',null)).messages.at(-1).direction,'outgoing');
   await writeFile(join(root,'live-event-missed'),'Only WhatsApp history has this PDF');
   let recovered;
-  for(let attempt=0;attempt<180;attempt++){
+  for(let attempt=0;attempt<120;attempt++){
    recovered=await engine.call('snapshot',null);
    if(recovered.attachments.some(file=>file.message_id==='recovered-live-pdf'&&file.status==='Ready'))break;
    await new Promise(resolve=>setTimeout(resolve,100));
   }
   assert.equal(recovered.messages.filter(message=>message.id==='recovered-live-pdf').length,1);
+  assert.equal(recovered.messages.find(message=>message.id==='recovered-live-pdf').unread,1);
   assert.ok(recovered.attachments.some(file=>file.message_id==='recovered-live-pdf'&&file.status==='Ready'));
+  assert.ok(recovered.customers.some(customer=>customer.phone==='94710000003'));
   await writeFile(join(root,'shop-data-marker'),'preserve');
   await engine.call('logout',null);
   assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');
@@ -639,9 +641,14 @@ test('WhatsApp Web reconnects automatically and restores the provider after rest
   await writeFile(join(root,'delay-initial-chats'),'Delay initial history');
   await writeFile(join(root,'release-qr'),'Ready');
   await engine.call('webConnect',null);
-  const initial=await waitFor('Connected',true);
+  let initial=await waitFor('Connected',true);
   assert.ok(initial.messages.some(message=>message.id==='fixture-old-pdf'));
+  for(let attempt=0;attempt<80&&!initial.attachments.some(file=>file.status==='Ready');attempt++){
+   await new Promise(resolve=>setTimeout(resolve,25));
+   initial=await engine.call('snapshot',null);
+  }
   const file=initial.attachments.find(file=>file.status==='Ready');
+  assert.ok(file,'A synced attachment should download automatically');
   const order=await engine.call('order',{customer:file.customer_id,files:[file.id],copies:1,paper:'A4',colour:false,price:1000,discount:0,charge:0});
   await writeFile(join(root,'disconnect-web'),'Disconnect');
   const reconnecting=await waitFor('Reconnecting');

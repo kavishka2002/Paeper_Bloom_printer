@@ -7,8 +7,9 @@ import {launch,type Browser,type ConsoleMessage,type HTTPRequest,type Page} from
 import {installWhatsAppAuthStateFallback,whatsappAccountIsReadyFromPage,whatsappAuthStateFromPage} from './auth-state';
 export {whatsappAuthStateFromPage} from './auth-state';
 
-export type WebMessage={id:string;phone:string;name:string;kind:string;text:string;created:string;chat?:string;outgoing?:boolean;file?:{remote:string;name:string}};
+export type WebMessage={id:string;phone:string;name:string;kind:string;text:string;created:string;chat?:string;outgoing?:boolean;unread?:boolean;file?:{remote:string;name:string}};
 type Identity={chat:string;phone:string;name:string};
+type MessageFields=Pick<Message,'id'|'timestamp'|'type'|'body'|'fromMe'|'hasMedia'|'rawData'|'from'|'to'>;
 type DirectChatModel={id:{_serialized:string};formattedTitle?:string;t?:number;isGroup:false};
 const DirectChat=Reflect.get(require('whatsapp-web.js'),'Chat') as new (client:Client,model:DirectChatModel)=>Chat;
 type QRInfo={clientId:string;generatedAt:string};
@@ -100,6 +101,9 @@ export class WebAdapter {
   private authStatePoll?:ReturnType<typeof setInterval>;
   private authStateInFlight=false;
   private activeInject?:Promise<void>;
+  private connectionWatch?:ReturnType<typeof setTimeout>;
+  private readonly phonesByLid=new Map<string,string>();
+  private readonly checkedCachedIds=new Set<string>();
   private readonly pageDisposers:Array<()=>void>=[];
   private monitoredPage?:Page;
   private stopQrTimers(){
@@ -302,6 +306,21 @@ export class WebAdapter {
   }
   private attachClientEvents(client:Client){
     const callbacks=this.callbacks;
+    client.on('change_state',state=>{
+      if(this.stopped||!this.ready)return;
+      if(state==='CONNECTED'){
+        clearTimeout(this.connectionWatch);
+        this.connectionWatch=undefined;
+      }else if(state==='TIMEOUT'&&!this.connectionWatch){
+        this.connectionWatch=setTimeout(()=>{
+          this.connectionWatch=undefined;
+          if(this.stopped||!this.ready)return;
+          this.ready=false;
+          this.hasBeenReady=false;
+          callbacks.offline('WhatsApp Web stopped responding. Reconnecting with the saved session.',true);
+        },20_000);
+      }
+    });
     client.on('authenticated',()=>{
       // WhatsApp Web can emit an extra sync/authenticated event after ready.
       if(this.stopped||this.ready||this.authenticated)return;
@@ -339,6 +358,8 @@ export class WebAdapter {
       }
     });
     client.on('disconnected',()=>{
+      clearTimeout(this.connectionWatch);
+      this.connectionWatch=undefined;
       const shouldRetry=this.hasBeenReady;
       this.hasBeenReady=false;
       clearTimeout(this.startupTimer);
@@ -520,24 +541,31 @@ export class WebAdapter {
   }
   private isDirect(chat:string){return /^\d+@(?:c\.us|lid|s\.whatsapp\.net)$/.test(chat)}
   private async identity(chat:string,contact?:Contact,name?:string):Promise<Identity>{
-    let phone=phoneFromChat(chat)||phoneFromChat(contact?.id?._serialized??'');
+    let phone=phoneFromChat(chat)||phoneFromChat(contact?.id?._serialized??'')||this.phonesByLid.get(chat)||'';
     if(!phone&&chat.endsWith('@lid')){
       const [match]=await historyWithin(this.client!.getContactLidAndPhone([chat]),3_000).catch(()=>[]);
       phone=phoneFromChat(match?.pn??'');
     }
-    if(phone)this.chats.set(phone,chat);
+    if(phone){
+      this.chats.set(phone,chat);
+      if(chat.endsWith('@lid'))this.phonesByLid.set(chat,phone);
+    }
     return {chat,phone,name:contact?.name||contact?.pushname||name||phone||'WhatsApp contact'};
   }
   private async captureIncoming(msg:Message,outgoing=false){
-    const chat=outgoing?msg.to:msg.from;
+    const peer=outgoing?msg.to:msg.from;
+    const remote=msg.id?.remote;
+    const chat=typeof remote==='string'&&remote?remote:peer;
     if(msg.fromMe!==outgoing||!this.isDirect(chat))return;
     const notifyName=(msg.rawData as {notifyName?:unknown}|undefined)?.notifyName;
-    const contact=!outgoing&&phoneFromChat(chat)?undefined:await historyWithin(outgoing?this.client!.getContactById(chat):msg.getContact(),3_000).catch(()=>undefined);
+    const contact=phoneFromChat(chat)||this.phonesByLid.has(chat)||typeof notifyName==='string'
+      ?undefined:await historyWithin(outgoing?this.client!.getContactById(chat):msg.getContact(),3_000).catch(()=>undefined);
     const info=this.normalize(msg,await this.identity(chat,contact,typeof notifyName==='string'?notifyName:undefined));
     if(info&&!this.stopped&&this.ready)this.callbacks.message(info);
   }
-  private normalize(msg:Message,identity:Identity):WebMessage|undefined{
-    if(!msg.id?._serialized||!Number.isFinite(msg.timestamp)||Math.abs(msg.timestamp)>9_999_999_999)return;
+  private normalize(msg:MessageFields,identity:Identity):WebMessage|undefined{
+    const timestamp=Number(msg.timestamp);
+    if(!msg.id?._serialized||!Number.isFinite(timestamp)||timestamp<=0||timestamp>9_999_999_999)return;
     const id=msg.id._serialized;
     const kind=String(msg.type);
     if(isWhatsAppSystemMessage(kind)||kind==='ciphertext')return;
@@ -545,12 +573,63 @@ export class WebAdapter {
     const rawName=raw?.filename;
     const file=(kind==='image'||kind==='document')
       ?{remote:id,name:typeof rawName==='string'&&rawName?rawName:kind==='image'?'WhatsApp image':'WhatsApp document'}:undefined;
-    if(file&&msg.hasMedia){
-      this.incoming.set(id,msg);
+    if(file&&msg.hasMedia&&'downloadMediaStream' in msg){
+      this.incoming.set(id,msg as Message);
       if(this.incoming.size>250)this.incoming.delete(this.incoming.keys().next().value!);
     }
     const text=file&&!msg.hasMedia?(typeof raw?.caption==='string'?raw.caption:''):msg.body??'';
-    return {...identity,id,kind,text,created:new Date(msg.timestamp*1000).toISOString(),outgoing:msg.fromMe,file};
+    return {...identity,id,kind,text,created:new Date(timestamp*1000).toISOString(),outgoing:msg.fromMe,file};
+  }
+  async syncCachedMessages(needsImport:(message:MessageFields)=>boolean,consume:(messages:WebMessage[])=>void){
+    const page=this.client?.pupPage;
+    if(!this.ready||this.stopped||!page)return;
+    const messages=await historyWithin(page.evaluate((checkedIds:string[])=>{
+      type Wid=string|{_serialized?:string;$1?:string};
+      type Msg={
+        id?:{_serialized?:string;$1?:string;id?:string;remote?:Wid;fromMe?:boolean};
+        from?:Wid;to?:Wid;t?:number;type?:MessageFields['type'];body?:string;caption?:string;
+        filename?:string;notifyName?:string;pollName?:string;eventName?:string;directPath?:string;isNotification?:boolean;isNewMsg?:boolean;
+      };
+      type Collection={getModelsArray?:()=>Msg[]};
+      const runtime=window as Window&{require?:(name:string)=>{Msg?:Collection;MsgCollection?:Collection}};
+      const load=(name:string)=>{try{return runtime.require?.(name)}catch{return undefined}};
+      const collection=load('WAWebMsgCollection')?.MsgCollection??load('WAWebCollections')?.Msg;
+      const wid=(value?:Wid)=>typeof value==='string'?value:value?._serialized??value?.$1??'';
+      const checked=new Set(checkedIds);
+      return collection?.getModelsArray?.().flatMap(msg=>{
+        const key=msg.id;
+        const id=key?._serialized??key?.$1;
+        const fromMe=key?.fromMe===true;
+        const remote=wid(key?.remote)||(fromMe?wid(msg.to):wid(msg.from));
+        if(!id||checked.has(id)||!/^\d+@(?:c\.us|lid|s\.whatsapp\.net)$/.test(remote)||!msg.type||!msg.t||msg.type==='ciphertext'||msg.isNotification)return [];
+        return [{id:{_serialized:id,id:key?.id??'',fromMe,remote},fromMe,from:fromMe?wid(msg.from):remote,to:fromMe?remote:wid(msg.to),
+          type:msg.type,timestamp:msg.t,hasMedia:!!msg.directPath,unread:!fromMe&&msg.isNewMsg===true,
+          body:msg.directPath?msg.caption??'':msg.body??msg.pollName??msg.eventName??'',
+          rawData:{filename:msg.filename,caption:msg.caption,notifyName:msg.notifyName}}];
+      })??[];
+    },[...this.checkedCachedIds]));
+    const identities=new Map<string,Promise<Identity>>();
+    for(let offset=0;offset<messages.length;offset+=8){
+      if(!this.ready||this.stopped)return;
+      const candidates=messages.slice(offset,offset+8);
+      const batch=await Promise.all(candidates.filter(needsImport).map(async msg=>{
+        const chat=msg.id.remote;
+        let identity=identities.get(chat);
+        if(!identity){
+          identity=this.identity(chat,undefined,msg.rawData.notifyName);
+          identities.set(chat,identity);
+        }
+        const normalized=this.normalize(msg,await identity);
+        return normalized?{...normalized,unread:msg.unread}:undefined;
+      }));
+      if(!this.ready||this.stopped)return;
+      const normalized=batch.filter(message=>message!==undefined);
+      if(normalized.length)consume(normalized);
+      for(const msg of candidates){
+        if(msg.hasMedia||(msg.type!=='image'&&msg.type!=='document'))this.checkedCachedIds.add(msg.id._serialized);
+      }
+    }
+    while(this.checkedCachedIds.size>20_000)this.checkedCachedIds.delete(this.checkedCachedIds.values().next().value!);
   }
   private async fetchHistory(chat:Chat,cachedOnly=false){
     let partial=false;
@@ -646,7 +725,7 @@ export class WebAdapter {
     const msg=cached?.hasMedia?cached:await historyWithin(this.client!.getMessageById(id));
     signal.throwIfAborted();
     if(!msg?.hasMedia)throw new Error('WhatsApp Web no longer has this attachment.');
-    const media=await msg.downloadMediaStream({chunkSize:1024*1024});
+    const media=await msg.downloadMediaStream({chunkSize:2*1024*1024});
     if(!media)throw new Error('WhatsApp Web did not return the attachment.');
     return {stream:media.stream as AsyncIterable<Uint8Array>,size:typeof media.filesize==='number'&&Number.isSafeInteger(media.filesize)&&media.filesize>0?media.filesize:undefined};
   }
@@ -660,6 +739,8 @@ export class WebAdapter {
     return message.id._serialized;
   }
   async stop(logout=false){
+    clearTimeout(this.connectionWatch);
+    this.connectionWatch=undefined;
     if(logout)this.logoutRequested=true;
     if(this.stopPromise){
       try{

@@ -108,7 +108,9 @@ function retryWeb(){
   changed();
   webRetry=setTimeout(()=>{
     webRetry=undefined;
-    if(!shuttingDown&&store.setting('whatsappProvider')==='web')void connectWeb(null,true).catch(()=>{});
+    if(shuttingDown||store.setting('whatsappProvider')!=='web')return;
+    if(webTransition){retryWeb();return}
+    void connectWeb(null,true).catch(()=>{});
   },delay);
 }
 let connection:Snapshot['connection']={status:'Disconnected',phone:'',webhook:false};
@@ -116,8 +118,17 @@ let networkBusy=false;
 const inflight=new Set<string>();
 const mediaDownloads=new Map<string,{promise:Promise<void>;controller:AbortController}>();
 const downloadStatus=new Map<string,NonNullable<Attachment['download']>>();
-const downloadSlots=[Promise.resolve(),Promise.resolve()];
-let nextDownloadSlot=0;
+const queuedLiveMedia:Array<()=>void>=[];
+const queuedMedia:Array<()=>void>=[];
+let activeMediaDownloads=0;
+function startMediaDownloads(){
+  while(activeMediaDownloads<3){
+    const next=queuedLiveMedia.shift()??queuedMedia.shift();
+    if(!next)return;
+    activeMediaDownloads++;
+    next();
+  }
+}
 const printFiles=(id:string)=>rows<{attachment_id:string}>('SELECT attachment_id FROM print_job_files WHERE job_id=? ORDER BY rowid',id).map(x=>x.attachment_id);
 const jobQuery='SELECT j.*,COALESCE((SELECT SUM(amount) FROM payments WHERE job_id=j.id),0) AS paid FROM print_jobs j';
 const attachmentFields='id,customer_id,message_id,name,mime,status,created,bytes';
@@ -246,22 +257,30 @@ function mediaError(error:unknown){
   if(/^(WhatsApp|Meta|Connect the original|Unexpected media|Large attachments|The attachment|Import a valid|Multi-page|The installed image)/.test(message))return message;
   return 'The attachment download was interrupted or could not be read. Retry while WhatsApp is connected.';
 }
-function receiveMedia(id:string):Promise<void>{
+function receiveMedia(id:string,live=false):Promise<void>{
   const existing=mediaDownloads.get(id);
-  if(existing)return existing.controller.signal.aborted?existing.promise.catch(()=>{}).then(()=>receiveMedia(id)):existing.promise;
+  if(existing)return existing.controller.signal.aborted?existing.promise.catch(()=>{}).then(()=>receiveMedia(id,live)):existing.promise;
   const controller=new AbortController();
   run("UPDATE attachments SET status='Pending' WHERE id=? AND remote IS NOT NULL AND status IN ('Available to download','Cancelled','Failed')",id);
   changed();
-  const index=nextDownloadSlot++%downloadSlots.length;
-  const promise=downloadSlots[index].then(()=>downloadMedia(id,controller.signal)).finally(()=>mediaDownloads.delete(id));
-  downloadSlots[index]=promise.catch(()=>{});
+  const promise=new Promise<void>((resolve,reject)=>{
+    (live?queuedLiveMedia:queuedMedia).push(()=>{
+      void downloadMedia(id,controller.signal).finally(()=>{
+        mediaDownloads.delete(id);
+        activeMediaDownloads--;
+        startMediaDownloads();
+      }).then(resolve,reject);
+    });
+  });
   mediaDownloads.set(id,{promise,controller});
+  startMediaDownloads();
   return promise;
 }
 async function downloadMedia(id:string,signal:AbortSignal){
   if(signal.aborted)return;
   const a=row<Attachment&{remote:string;account_id:string}>('SELECT a.*,m.account_id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?',id);
   if(a&&['Ready','Needs conversion'].includes(a.status))return;
+  if(a?.account_id.startsWith('web:')&&connection.status!=='Connected'&&a.account_id===store.setting('lastWebAccount'))return;
   const current=a?.account_id.startsWith('web:')?web:adapter;
   const account=current instanceof WebAdapter?current.account:current?.config.phoneId;
   if(!a||!current||a.account_id!==account){
@@ -302,7 +321,7 @@ async function downloadMedia(id:string,signal:AbortSignal){
       run("UPDATE attachments SET status='Failed' WHERE id=?",id);
       downloadStatus.set(id,{bytes:0,error:mediaError(error)});
       const retries=store.setting<Record<string,{attempt:number;due:number}>>('mediaRetries')??{},attempt=(retries[id]?.attempt??0)+1;
-      retries[id]={attempt,due:Date.now()+Math.min(300000,5000*2**attempt)};store.save('mediaRetries',retries);
+      retries[id]={attempt,due:Date.now()+Math.min(300000,1000*2**attempt)};store.save('mediaRetries',retries);
     }store.audit('Attachment processing issue',a.name+' - '+(error instanceof Error?error.message:String(error)));throw error} 
   finally{inflight.delete(id);changed()}
 }
@@ -313,7 +332,7 @@ setInterval(()=>{
   const record=row<{account_id:string}>('SELECT m.account_id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?',id);
   if(record?.account_id===(web?.account??adapter?.config.phoneId))void receiveMedia(id).catch(()=>{});
  }
-},5000).unref();
+},2000).unref();
 function connectedWhatsAppAccount(){
   return ['Connected','API reachable'].includes(connection.status)?(web?.account||adapter?.config.phoneId):undefined;
 }
@@ -455,15 +474,15 @@ function ingest(account:string,msg:WebMessage,events:Event[],imports:string[],hi
   run('INSERT OR IGNORE INTO conversations VALUES (?,?)',account,customer);
   const body=msg.text.slice(0,4096);
   if(prior)run("UPDATE messages SET body=?,kind=?,status='received',unread=1 WHERE id=?",body,msg.kind,msg.id);
-  else run('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)',msg.id,account,customer,body,msg.kind,msg.outgoing?'outgoing':'incoming',historical||msg.outgoing?'history':'received',msg.created,historical||msg.outgoing?0:1);
+  else run('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)',msg.id,account,customer,body,msg.kind,msg.outgoing?'outgoing':'incoming',historical||msg.outgoing?'history':'received',msg.created,!msg.outgoing&&(!historical||msg.unread)?1:0);
   ingestAttachment(customer,msg,imports);
   if(historical||msg.outgoing)return;
   events.push({id:msg.id,kind:'message',customer,text:body});
 }
-function processIncoming(events:Event[],imports:string[]){
+function processIncoming(events:Event[],imports:string[],live=false){
   changed();
   for(const event of events)void automation(event).catch(()=>store.audit('Automation error','An incoming message could not be processed.'));
-  for(const id of imports)void receiveMedia(id).catch(()=>{});
+  for(const id of imports)void receiveMedia(id,live).catch(()=>{});
 }
 let syncingWeb:WebAdapter|undefined;
 let recoveringWeb:WebAdapter|undefined;
@@ -476,19 +495,22 @@ function saveWebHistory(current:WebAdapter,messages:WebMessage[]){
   store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],imports,true)});
   processIncoming([],imports);
 }
-setInterval(async()=>{
+async function recoverWebMessages(){
   const current=web;
   if(!current||connection.status!=='Connected'||recoveringWeb===current)return;
   recoveringWeb=current;
   try{
     const lookup=db.prepare('SELECT m.kind,a.id AS attachment FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.account_id=? AND m.id=?');
-    const result=await current.syncHistory(messages=>saveWebHistory(current,messages),true,message=>{
+    const needsImport:Parameters<WebAdapter['syncCachedMessages']>[0]=message=>{
       const id=message.id?._serialized;
       if(!id)return false;
       const saved=lookup.get(current.account,id) as {attachment:string|null;kind:string}|undefined;
       return !saved||saved.kind==='ciphertext'||
         ((message.type==='image'||message.type==='document')&&!saved.attachment);
-    });
+    };
+    const consume=(messages:WebMessage[])=>saveWebHistory(current,messages);
+    const cachedMessages=current.syncCachedMessages(needsImport,consume).catch(()=>{});
+    const result=await current.syncHistory(consume,true,needsImport).finally(()=>cachedMessages);
     if(result.chats&&result.failed===result.chats&&!result.imported)throw new Error('WhatsApp did not return messages for any direct chat.');
     if(web===current&&connection.status==='Connected'){
       webRecoveryFailures=0;
@@ -511,7 +533,8 @@ setInterval(async()=>{
   }finally{
     if(recoveringWeb===current)recoveringWeb=undefined;
   }
-},15_000).unref();
+}
+setInterval(()=>void recoverWebMessages(),8_000).unref();
 async function syncChatDocuments({id}:Input<'webChatSync'>){
   const current=web;
   if(!current||connection.status!=='Connected')throw new Error('Connect WhatsApp Web before loading documents.');
@@ -626,6 +649,7 @@ async function connectWeb(_input:null=null,automatic=false){
         webRetryAttempt=0;
         if(webRetry){clearTimeout(webRetry);webRetry=undefined}
         connection={status:'Connected',mode:'web',phone,webhook:false};changed();
+        void recoverWebMessages();
         void syncWebChats(true);
         for(const a of rows<{id:string}>("SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.account_id=? AND a.remote IS NOT NULL AND (a.status='Pending' OR (a.status='Available to download' AND m.direction='incoming')) ORDER BY a.created DESC",account))void receiveMedia(a.id).catch(()=>{});
       },
@@ -633,7 +657,7 @@ async function connectWeb(_input:null=null,automatic=false){
         if(web===next){
           connection={...connection,status:'Connection Failed',qr:undefined,qrClientId:undefined,qrGeneratedAt:undefined,detail};
           changed();
-          if(retry)retryWeb();
+          if(retry||(store.setting('lastWebAccount')&&/browser closed|did not finish starting|could not finish initializing/i.test(detail)))retryWeb();
         }
       },
       progress(status){
@@ -646,7 +670,7 @@ async function connectWeb(_input:null=null,automatic=false){
         if(web!==next)return;
         const events:Event[]=[];const imports:string[]=[];
         store.atomic(()=>ingest(next.account,info,events,imports));
-        processIncoming(events,imports);
+        processIncoming(events,imports,true);
       },
       ack(id,status){if(web===next)updateDelivery(next.account,id,status)}
     });
@@ -662,7 +686,7 @@ async function connectWeb(_input:null=null,automatic=false){
         const stopDetail=stopError instanceof Error?stopError.message.replace(/[\r\n\t]+/g,' ').slice(0,240):'Unknown shutdown error.';
         connection={...connection,detail:connection.detail+' Browser shutdown also failed: '+stopDetail};changed();
       }
-      if(web===next&&store.setting('lastWebAccount')&&/already running for|ERR_(?:INTERNET_DISCONNECTED|NETWORK_CHANGED|NAME_NOT_RESOLVED|CONNECTION_[A-Z_]+)/i.test(reason))retryWeb();
+      if(web===next&&store.setting('lastWebAccount')&&/already running for|timed?\s*out|timeout|target closed|ERR_(?:INTERNET_DISCONNECTED|NETWORK_CHANGED|NAME_NOT_RESOLVED|CONNECTION_[A-Z_]+)/i.test(reason))retryWeb();
     }
   }catch(error){
     if(operation===webOperation){

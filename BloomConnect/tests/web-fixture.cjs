@@ -46,7 +46,12 @@ class Client extends EventEmitter{
  writeFileSync(join(root,'whatsapp-web','session','Default','Preferences'),'fixture session');
  const socketModel={};
  const connectionModel={Conn:{ref:'synthetic-qr-ref'}};
- global.window={require:name=>name==='WAWebChatCollection'&&existsSync(join(root,'direct-chat-collection'))?{
+ global.window={require:name=>name==='WAWebMsgCollection'?{
+  MsgCollection:{getModelsArray:()=>!this.isSecondAccount&&existsSync(join(root,'live-event-missed'))?[
+   {id:{$1:'recovered-live-pdf',remote:{$1:'94710000003@c.us'},fromMe:false},type:'document',
+    t:incoming.timestamp+120,filename:'recovered-live.pdf',directPath:'/fixture',notifyName:'New direct contact',isNewMsg:true}
+  ]:[]}
+ }:name==='WAWebChatCollection'&&existsSync(join(root,'direct-chat-collection'))?{
   ChatCollection:{getModelsArray:()=>[
    {id:{$1:this.message.from},formattedTitle:'Web fixture customer',t:this.message.timestamp},
    {id:{$1:'123@g.us'},get formattedTitle(){throw new Error('Group metadata must not be read')}},
@@ -62,9 +67,9 @@ class Client extends EventEmitter{
   if(url!=='https://web.whatsapp.com/'||options.waitUntil!=='domcontentloaded'||options.timeout<=0)throw new Error('Expected bounded WhatsApp startup navigation.');
  },
  url:()=>nativeLogin&&!linked()?'https://web.whatsapp.com/login/':'https://web.whatsapp.com/',
- evaluate:async predicate=>{
+ evaluate:async (predicate,...args)=>{
   if(nativeLogin&&predicate.toString().includes('querySelector'))return linked()?null:'data:image/png;base64,fixture-native-qr';
-  return new Function('return ('+predicate.toString()+')')()();
+  return new Function('return ('+predicate.toString()+')')()(...args);
  },waitForFunction:async(predicate)=>{
   if(process.env.BLOOMCONNECT_TEST_WEB_AUTH_STATE_TIMEOUT==='1'&&predicate.toString().includes('WAWebSocketModel'))throw new Error('Waiting failed:60000ms exceeded');
   return {dispose:async()=>{},jsonValue:async()=>{
@@ -124,9 +129,6 @@ class Client extends EventEmitter{
  lastMessage:existsSync(join(root,'skip-cached-history'))?this.message:undefined,
  getContact:()=>this.message.getContact(),
  fetchMessages:async({limit})=>{
-  if(limit===undefined&&existsSync(join(root,'live-event-missed')))return [
-   {...incoming,id:{_serialized:'recovered-live-pdf'},rawData:{filename:'recovered-live.pdf'},timestamp:incoming.timestamp+120}
-  ];
   if(existsSync(join(root,'skip-cached-history')))return [
    {...incoming,id:{_serialized:'missed-pdf'},rawData:{filename:'missed.pdf'},timestamp:incoming.timestamp-300}
   ];
