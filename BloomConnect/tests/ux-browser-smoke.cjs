@@ -97,7 +97,10 @@ async function checkWorkflow(){
      data.attachments.push({...file,id:'converted-office',message_id:null,name:'linked-slides.pdf'});
      return 'converted-office';
     }
-    if(op==='printerCapabilities')return input.printer==='OneNote (Desktop)'?{...capabilities,name:input.printer,driver:'Send to Microsoft OneNote 16 Driver',duplex:false}:capabilities;
+    if(op==='printerCapabilities'){
+     if(input.printer==='Samsung SCX-6545X Series PS')throw new Error('Driver capabilities unavailable');
+     return input.printer==='OneNote (Desktop)'?{...capabilities,name:input.printer,driver:'Send to Microsoft OneNote 16 Driver',duplex:false}:capabilities;
+    }
     if(op==='printPresets')return {defaultId:null,presets:[]};
     if(op==='pricingRules')return [];
     if(op==='order'){
@@ -156,7 +159,7 @@ async function checkWorkflow(){
      useWorkspace.getState().set({view:'WhatsApp',customer:'history-chat'});
      await refresh();
     };
-    return <ctx.Provider value={{data:snapshot,printers:[{name:'Microsoft Print to PDF',displayName:'Microsoft Print to PDF',isDefault:true},{name:'OneNote (Desktop)',displayName:'OneNote (Desktop)',isDefault:false},...(hasPhysical?[{name:printer,displayName:'Toshiba 257',isDefault:false}]:[])],
+    return <ctx.Provider value={{data:snapshot,printers:[{name:'Microsoft Print to PDF',displayName:'Microsoft Print to PDF',isDefault:true},{name:'OneNote (Desktop)',displayName:'OneNote (Desktop)',isDefault:false},...(hasPhysical?[{name:printer,displayName:'Toshiba 257',isDefault:false},{name:'Samsung SCX-6545X Series PS',displayName:'Samsung SCX-6545X Series PS',isDefault:false}]:[])],
      run:async(op,input)=>{await window.bloom.call(op,input);await refresh();return true},refresh,error:e=>{window.friendly=e.message}}}>
      {view==='PDF Studio'?<PdfWorkspace/>:view==='Print Studio'?<Studio/>:view==='Orders'?<Orders/>:view==='WhatsApp'?<InboxView/>:<Queue/>}
      <PdfPrintPopup/>
@@ -185,6 +188,30 @@ async function checkWorkflow(){
     button=>button.textContent.trim()===text&&!button.disabled&&button.getClientRects().length),{},scope,label);
    await ready.evaluate(button=>button.click());
    await ready.dispose();
+  }
+  async function selectCopierInPhotoPreview(){
+   await click('Review nearby photos (2 photos)');
+   const printerSelect='.photo-quick-print-settings select[aria-label="Printer"]';
+   await page.waitForSelector(printerSelect);
+   assert.equal(await page.$eval(printerSelect,select=>select.value),'Microsoft Print to PDF');
+   await page.select(printerSelect,'Samsung SCX-6545X Series PS');
+   await click('1','.photo-quick-layout');
+   await page.waitForFunction(()=>{
+    const actions=document.querySelector('.photo-review-panel .photo-print-action');
+    const print=[...(actions?.querySelectorAll('button')??[])].find(button=>button.textContent.trim()==='Print Now');
+    return print&&!print.disabled&&actions.textContent.includes('Printing with the selected margins.');
+   });
+  }
+  if(process.argv.includes('--photo-copier')){
+   await page.evaluate(()=>window.navigate('WhatsApp'));
+   await selectCopierInPhotoPreview();
+   await click('Print Now','.photo-review-panel');
+   await page.waitForFunction(()=>window.attempts.some(print=>print.photoBatch&&print.printer==='Samsung SCX-6545X Series PS'));
+   const request=await page.evaluate(()=>window.attempts.at(-1));
+   assert.equal(request.paper,'A4');
+   assert.deepEqual(request.printable,{left:5,right:5,top:5,bottom:5});
+   console.log('Photo Print Now submits A4 to a copier with unavailable driver capabilities.');
+   return;
   }
   await page.waitForSelector('.studio-files button');
   await page.click('.studio-files button');
@@ -337,8 +364,7 @@ async function checkWorkflow(){
   await page.waitForFunction(()=>window.exports.length===2);
   assert.ok(await page.evaluate(()=>window.exports.every(input=>input.printer==='Microsoft Print to PDF')));
   await page.click(batch+' button[aria-label="Close details"]');
-  await click('Review nearby photos (2 photos)');
-  assert.equal(await page.$eval('.photo-quick-print-settings select[aria-label="Printer"]',select=>select.value),'Microsoft Print to PDF');
+  await selectCopierInPhotoPreview();
   await page.select('.photo-quick-print-settings select[aria-label="Printer"]','TOSHIBA e-STUDIO257');
   await click('Printer properties','.photo-review-panel');
   assert.deepEqual(await page.evaluate(()=>window.printerDialogRequest),{printer:'TOSHIBA e-STUDIO257',kind:'properties'});

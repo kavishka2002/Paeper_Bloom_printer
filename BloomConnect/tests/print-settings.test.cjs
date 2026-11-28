@@ -157,9 +157,18 @@ test('document printing can fall back when a copier does not return driver capab
  assert.equal(canPrintWithoutCapabilities(settings),true);
  assert.equal(submissionDuplex(settings.duplex,false,false),'manualAuto');
  assert.equal(submissionDuplex('simplex',false,false),'simplex');
- for(const change of [{paper:'Custom'},{tray:1},{driverDpi:{x:600,y:600}},{scaling:'printable'},{photoBatch:true}]){
+ for(const change of [{paper:'Custom'},{tray:1},{driverDpi:{x:600,y:600}},{scaling:'printable'}]){
   assert.equal(canPrintWithoutCapabilities({...settings,...change}),false);
  }
+});
+
+test('standard photo layouts can use a printer with unavailable settings and explicit margins',()=>{
+ const {canPrintWithoutCapabilities}=mod.exports;
+ const settings=normalizedSettings({...base,photoBatch:true,marginMm:5});
+ assert.equal(canPrintWithoutCapabilities(settings),true);
+ assert.equal(canPrintWithoutCapabilities({...settings,marginMm:0}),false);
+ assert.equal(canPrintWithoutCapabilities({...settings,margins:{left:5,right:5,top:5,bottom:4}}),false);
+ assert.equal(canPrintWithoutCapabilities({...settings,paper:'Custom'}),false);
 });
 
 const photoDoc=id=>({id,mime:'image/jpeg',pages:[{widthMm:100,heightMm:150,blank:false,ink:'colour',coverage:1}]});

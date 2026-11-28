@@ -25,7 +25,11 @@ export function printerSupplyWarning(code:number){
   return code===3?'The printer reports low paper.':code===5?'The printer reports low toner.':'';
 }
 export function canPrintWithoutCapabilities(s:PrintSettingsInput){
-  return s.paper!=='Custom'&&s.tray===undefined&&!s.driverDpi&&s.scaling!=='printable'&&!s.photoBatch&&!Object.keys(s.photoItems??{}).length;
+  if(s.paper==='Custom'||s.tray!==undefined||s.driverDpi||s.scaling==='printable')return false;
+  if(!s.photoBatch&&!Object.keys(s.photoItems??{}).length)return true;
+  const margins=s.margins??{top:s.marginMm,right:s.marginMm,bottom:s.marginMm,left:s.marginMm};
+  return (['top','right','bottom','left'] as const).every(edge=>
+    Math.max(margins[edge]??0,s.printable?.[edge]??0)>=5);
 }
 export function validatePrinter(s:PrintSettings,c:PrinterCapabilities){
   if(c.name!==s.printer)throw new Error('Printer capability data does not match this printer.');

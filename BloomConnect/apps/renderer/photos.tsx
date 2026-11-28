@@ -1,6 +1,6 @@
 import {SkipAutoMessages} from './print-settings';
 import {DuplexOptions} from './print-settings';
-import {isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning} from '../../packages/printing/capabilities';
+import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning} from '../../packages/printing/capabilities';
 import {useQueryClient} from '@tanstack/react-query';
 import {ArrowDown,ArrowLeft,ArrowUp,Images,Pencil,Printer,SlidersHorizontal} from 'lucide-react';
 import {calculateBulk,documentPricing} from '../../packages/printing/calculation';
@@ -125,9 +125,12 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  useEffect(()=>{if(active&&active.id===createdOrder.current){createdOrder.current=undefined;return}let saved=active?.printSettings;const previous=data.queue.find(q=>q.job_id===active?.id&&q.settings&&['Submitted','Completed','Unconfirmed'].includes(q.status));if(!saved&&previous?.settings){try{const prior=normalizedSettings(JSON.parse(previous.settings));if(Object.keys(prior.photoItems).length)saved=prior}catch{}}setBatchFilters({});setFilterNotice('');setSettingsOpen(false);setEditorOpen(false);setOriginal('');setPast([]);setFuture([]);setInk('inherit');setColour(saved?.colour??true);setCharge((saved?.photoAdjustments?.charge??0)/100);setDiscount((saved?.photoAdjustments?.discount??0)/100);setPdfPrinter(saved?.pdfSettings?.printer??'');setAutoFit(!saved);setCustomGrid(!!saved?.photoGrid);setRows(saved?.photoGrid?.rows??1);setColumns(saved?.photoGrid?.columns??1);setGridCapacity(saved?.photoGrid?.capacity);setDuplex(saved?.duplex??'simplex');setOrder(saved?.order??'horizontal');setFit(saved?.fit??'contain');setSelected(active?[...new Set([...(saved?.fileSelection??[]),...active.files])].filter(id=>data.attachments.find(a=>a.id===id)?.mime.startsWith('image/')&&(!Object.keys(saved?.photoItems??{}).length||!!saved?.photoItems?.[id])):state.photoDraft);if(state.photoDraft.length)state.set({photoDraft:[],lightenPhotoDraft:false});setItems(!active&&state.lightenPhotoDraft?Object.fromEntries(state.photoDraft.map(id=>[id,{...defaultItem(),documentLightening:defaultLightening}])):Object.fromEntries(Object.entries(saved?.photoItems??{}).map(([id,v])=>[id,{...v,rotation:v.rotation??0,fit:v.fit??'contain'}])));setCustomer(active?(active.customer_id??'walk-in'):state.customer);setExtraPdfs(active&&!saved?.photoBatch?active.files.filter(id=>data.attachments.find(a=>a.id===id)?.mime==='application/pdf'):[]);if(saved){setPaper(['A4','A3','A5','A6','Letter','Legal','Custom'].includes(saved.paper)?saved.paper as typeof paper:'A4');setPrinter(saved.printer);setLandscape(saved.landscape);setMargin(saved.marginMm??5);setGap(saved.gapMm??2);setGuides(saved.photo?.cutGuides??false);setWhiteBorder(saved.photo?.whiteBorderMm??0);setMaxPerSheet(saved.photoMaxPerSheet??0);setPaperWidth(saved.customPaper?.widthMm??210);setPaperHeight(saved.customPaper?.heightMm??297);setDpi(saved.renderDpi??150);setSmoothing(saved.smoothing??true);setMedia(saved.photoMedia??'Default');setPdfCopies(saved.pdfSettings?.copies??1);setPdfNup(saved.pdfSettings?.nup??1);setPdfDuplex(saved.pdfSettings?.duplex??'simplex');setPdfColour(saved.pdfSettings?.colour??saved.colour);setArrangement(saved.photoArrangement??'auto');setPositions(saved.photoPositions??[])}},[active?.id]);
  const customerLibrary=data.attachments.filter(a=>a.status==='Ready'&&a.mime.startsWith('image/')&&(!customer||a.customer_id===(customer==='walk-in'?null:customer))&&a.name.toLowerCase().includes(search.toLowerCase())&&(!recent||Date.parse(a.created)>Date.now()-86400000)&&(!date||colomboDay(a.created)===date)&&(!unprinted||!data.jobs.some(j=>j.files.includes(a.id)&&j.status==='Completed')));
  const libraryLimit=Math.min(40-extraPdfs.length,customerLibrary.length);
- const [capabilities,setCapabilities]=useState<PrinterCapabilities>();
- const [capabilityError,setCapabilityError]=useState(''),[capabilityAttempt,setCapabilityAttempt]=useState(0);
- useEffect(()=>{let current=true;setCapabilities(undefined);setCapabilityError('');if(printer&&!isPdfPrinter(printer)&&(paper!=='Custom'||paperWidth>=20&&paperHeight>=20&&paperWidth<=2000&&paperHeight<=2000))void window.bloom.call('printerCapabilities',{printer,settings:normalizedSettings({printer,paper,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,copies:1,colour,landscape,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'})}).then(c=>{if(current)setCapabilities(c)}).catch(e=>{if(current)setCapabilityError(e instanceof Error?e.message:String(e))});return()=>{current=false}},[printer,paper,landscape,paperWidth,paperHeight,capabilityAttempt]);
+ const [capabilityAttempt,setCapabilityAttempt]=useState(0);
+ const capabilityKey=JSON.stringify([printer,paper,landscape,paperWidth,paperHeight,capabilityAttempt]);
+ const [printerCheck,setPrinterCheck]=useState<{key:string;capabilities?:PrinterCapabilities;error?:string}>();
+ const capabilities=printerCheck?.key===capabilityKey?printerCheck.capabilities:undefined;
+ const capabilityError=printerCheck?.key===capabilityKey?printerCheck.error:undefined;
+ useEffect(()=>{let current=true;if(printer&&!isPdfPrinter(printer)&&(paper!=='Custom'||paperWidth>=20&&paperHeight>=20&&paperWidth<=2000&&paperHeight<=2000))void window.bloom.call('printerCapabilities',{printer,settings:normalizedSettings({printer,paper,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,copies:1,colour,landscape,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'})}).then(c=>{if(current)setPrinterCheck({key:capabilityKey,capabilities:c})}).catch(e=>{if(current)setPrinterCheck({key:capabilityKey,error:e instanceof Error?e.message:String(e)})});return()=>{current=false}},[capabilityKey]);
  const pdfKey=extraPdfs.join('|');useEffect(()=>{let current=true;setPdfPages({});void (async()=>{const result:Record<string,number>={};for(const id of extraPdfs)result[id]=(await inspectDocument(id)).pages.length;if(current)setPdfPages(result)})().catch(error);return()=>{current=false}},[pdfKey]);
  const key=JSON.stringify([...selected].sort());
  useEffect(()=>{let current=true;setInfos([]);setFailure('');setFilterNotice('');void (async()=>{const values=[];for(const id of selected)values.push(await inspectDocument(id));if(current)setInfos(values)})().catch(e=>{if(current)setFailure(e.message)});return()=>{current=false}},[key]);
@@ -147,18 +150,22 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
   ?gridForPhotoCount(Math.min(automaticPhotoLimit,Math.max(1,requestedPrints)),landscape)
   :{rows:customRows,columns:customColumns,capacity:customCapacity};
  const adjustments={charge:Math.round(charge*100),discount:Math.round(discount*100)};
- const options:PrintSettingsInput={fileSelection:[...selected,...extraPdfs],pdfSettings:{copies:pdfCopies,nup:pdfNup,duplex:pdfDuplex,colour:pdfColour,printer:pdfPrinter||undefined},photoAdjustments:adjustments,photoMedia:media,photoArrangement:grid?'auto':arrangement,photoGrid:grid?{rows,columns,capacity:gridCapacity}:undefined,order,photoPositions:!grid&&arrangement==='manual'?positions:undefined,renderDpi:dpi,smoothing,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,photoMaxPerSheet:maxPerSheet||undefined,printable:capabilities?.printable,photoBatch:extraPdfs.length===0,printer,paper,copies:1,colour,landscape,duplex,range:'',rotation:0,fit,layout:'single',marginMm:margin,gapMm:gap,autoRotate:true,photoItems,photo:{widthMm:35,heightMm:45,quantity:1,cutGuides:guides,whiteBorderMm:whiteBorder}};
+ const monochromePrinter=capabilities?.colour===false;
+ const printPhotoItems=monochromePrinter?Object.fromEntries(selected.map(id=>[id,{...photoItems[id],ink:'mono' as const}])):photoItems;
+ const fallbackMargins=grid&&printer&&!isPdfPrinter(printer)?{left:5,right:5,top:5,bottom:5}:undefined;
+ const options:PrintSettingsInput={fileSelection:[...selected,...extraPdfs],pdfSettings:{copies:pdfCopies,nup:pdfNup,duplex:pdfDuplex,colour:pdfColour,printer:pdfPrinter||undefined},photoAdjustments:adjustments,photoMedia:media,photoArrangement:grid?'auto':arrangement,photoGrid:grid?{rows,columns,capacity:gridCapacity}:undefined,order,photoPositions:!grid&&arrangement==='manual'?positions:undefined,renderDpi:dpi,smoothing,customPaper:paper==='Custom'?{widthMm:paperWidth,heightMm:paperHeight}:undefined,photoMaxPerSheet:maxPerSheet||undefined,printable:capabilities?.printable??fallbackMargins,photoBatch:extraPdfs.length===0,printer,paper,copies:1,colour:colour&&!monochromePrinter,landscape,duplex,range:'',rotation:0,fit,layout:'single',marginMm:margin,gapMm:gap,autoRotate:true,photoItems:printPhotoItems,photo:{widthMm:35,heightMm:45,quantity:1,cutGuides:guides,whiteBorderMm:whiteBorder}};
  let plan:ReturnType<typeof planPhotos>|undefined,problem=failure;try{if(selected.length&&selected.every(id=>infos.some(info=>info.id===id)))plan=planPhotos(options,selected.map(id=>infos.find(info=>info.id===id)!))}catch(e){problem=e instanceof Error?e.message:String(e)}
  const outputColour=plan?plan.sides.some(side=>side.ink==='colour'):colour;
  const {policy,source:priceSource}=effectivePhotoPricing(findPhotoPricing(pricingRules,options)?.policy,data.settings!,duplex);let photoQuote:ReturnType<typeof quotePhotos>|undefined;try{if(plan)photoQuote=quotePhotos(plan,policy)}catch(e){problem=e instanceof Error?e.message:String(e)}
  const exportPrinter=isPdfPrinter(printer,capabilities?.driver);
  const supplyWarning=capabilities?printerSupplyWarning(capabilities.error):'';
  const virtualPrinter=isVirtualPrinter(printer)||isVirtualPrinter(capabilities?.driver??'')||isFileOutputPrinter(capabilities?.port??'');
- let printerProblem=active?.status==='Cancelled'?'Reopen the cancelled order before printing.':exportPrinter?'':!printer?'Select a Windows printer.':capabilityError?'Could not read printer settings. Check the connection and refresh printers.':'';
+ const driverFallback=!capabilities&&canPrintWithoutCapabilities({...options,photoBatch:true});
+ let printerProblem=active?.status==='Cancelled'?'Reopen the cancelled order before printing.':exportPrinter?'':!printers.some(item=>item.name===printer)?'Select an available Windows printer.':capabilityError&&!driverFallback?'Could not read printer settings. Use standard paper and margins of at least 5 mm, or refresh printers.':'';
  if(capabilities&&!printerProblem&&!exportPrinter){
   try{validateSubmissionPrinter(normalizedSettings({...options,colour:outputColour}),capabilities,virtualPrinter)}catch(e){printerProblem=e instanceof Error?e.message:String(e)}
  }
- if(!exportPrinter&&printer&&!capabilities&&!printerProblem)printerProblem='Reading Windows printer capabilities...';
+ if(!exportPrinter&&printer&&!capabilities&&!driverFallback&&!printerProblem)printerProblem='Reading Windows printer capabilities...';
  const pdfReady=extraPdfs.every(id=>pdfPages[id]!==undefined);
  const pdfPolicy=pricingRules.find(rule=>rule.method===(pdfNup>1?'nup':'ordinary')&&rule.paper===paper&&rule.duplex===(pdfDuplex!=='simplex')&&(!rule.media||rule.media==='Default'))?.policy??documentPricing(data.settings!,pdfDuplex,'sheet',paper);
  let pdfCalculation:ReturnType<typeof calculateBulk>|undefined;
@@ -503,6 +510,8 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  else if(addedPhotos&&!completeSelection)printHint='Select every order file to add new photos.';
  else if(!exportPrinter&&printerProblem)printHint=printerProblem+(capabilities&&!capabilities.colour&&outputColour?' Select Black & white.':'');
  else if(!exportPrinter&&!photosToPrint.length&&!pdfsToPrint.length)printHint='The selected files have already been submitted.';
+ else if(!exportPrinter&&capabilityError&&driverFallback)printHint='Printer settings unavailable. Printing with the selected margins.';
+ else if(!exportPrinter&&monochromePrinter&&!printHint)printHint='This printer prints photos in black & white.';
  const printButton=<div className="stack photo-print-action">
   {!exportPrinter&&messageCustomer&&<SkipAutoMessages value={skipAutoMessages} change={setSkipAutoMessages} disabled={busy}/>}
   <div className="actions"><PrinterPropertiesButton printer={printer} disabled={busy} onClose={()=>setCapabilityAttempt(attempt=>attempt+1)}/>
@@ -614,6 +623,7 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
    {printerControl}
    {sidesControl}
   </fieldset>
+  {printButton}
   <fieldset className="form-grid photo-quick-print-settings" disabled={busy}>
    <label>Photos per A4 side<select aria-label="Photos per A4 side" value={paper==='A4'&&autoFit?'auto':paper==='A4'&&grid?gridCapacity??rows*columns:''} onChange={e=>e.target.value==='auto'?useAutomaticFit():setA4Grid(Number(e.target.value))}>
     <option value="" disabled>{grid?'Choose an A4 layout':'Fixed photo sizes'}</option>
@@ -655,7 +665,6 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
    {selected.length===1&&selectedFilter!=='none'&&<Button className="quiet" disabled={busy} onClick={()=>setOriginal(original?'':selected[0])}>{original?'Show print preview':'Compare original'}</Button>}
    <Button className="secondary" disabled={!selected.length||busy} onClick={openPhotoOrder}><Pencil size={16}/> Edit photos</Button>
    <Button className="secondary" disabled={busy} onClick={()=>openPhotoSettings('Layout')}><SlidersHorizontal size={16}/> More print settings</Button>
-   {printButton}
   </div>
   {filterNotice&&<small role="status">{filterNotice}</small>}
   {selected.length>0&&(()=>{
