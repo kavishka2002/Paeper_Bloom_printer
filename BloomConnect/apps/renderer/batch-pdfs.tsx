@@ -3,7 +3,7 @@ import {useEffect,useId,useRef,useState,type ReactNode} from 'react';
 import {useQueryClient} from '@tanstack/react-query';
 import {ArrowDown,ArrowUp,BookOpen,Printer} from 'lucide-react';
 import {calculateBulk,documentPricing,type CalculationInput} from '../../packages/printing/calculation';
-import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,submissionDuplex,validateSubmissionPrinter} from '../../packages/printing/capabilities';
+import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,validateSubmissionPrinter} from '../../packages/printing/capabilities';
 import {planDocument,type DocumentInfo} from '../../packages/printing/plan';
 import {batchPdfFileSchema,normalizedSettings,type BatchPdfFile} from '../../packages/printing/settings';
 import type {PricingRule} from '../../packages/shared/contracts';
@@ -11,9 +11,10 @@ import {Button,Panel,PrinterPropertiesButton,money,useData} from './context';
 import {ImposedPreview,inspectDocument} from './pdf';
 import {useWorkspace} from './state';
 import {PageLayoutChoices} from './design';
-import {paperNames} from '../../packages/printing/paper';
+import {paperDimensions,paperNames} from '../../packages/printing/paper';
 import {BookletWizard,DuplexOptions,DuplexTest,PrintEstimate} from './print-settings';
 import {isManualDuplex} from '../../packages/printing/duplex';
+import type {PrinterCapabilities} from '../../packages/printing/windows';
 
 const defaults:BatchPdfFile={paper:'A4',copies:1,nup:1,colour:false,landscape:false,duplex:'auto',range:''};
 const settingsFor=(printer:string,file:BatchPdfFile)=>normalizedSettings({
@@ -138,12 +139,19 @@ export function BatchPdfStudio({initialFile,initialFiles,onSubmitted,renderEdito
   let sending='';
   try{
    const settings=Object.fromEntries(selected.map(id=>[id,fileSettings[id]??defaults]));
+   const printerChecks=new Map<string,Promise<PrinterCapabilities>>();
    for(const id of action==='print'&&!exporting?remaining:[]){
     sending=files.find(file=>file.id===id)?.name??id;
     setNotice('Checking printer settings for '+sending+'…');
     const input=settingsFor(printer,settings[id]);
-    const capabilities=await window.bloom.call('printerCapabilities',{printer,settings:input}).catch(error=>{
-     if(!canPrintWithoutCapabilities({...input,duplex:submissionDuplex(input.duplex,virtualPrinter)}))throw error;
+    const key=JSON.stringify([paperDimensions(input.paper,input.customPaper),input.landscape]);
+    let check=printerChecks.get(key);
+    if(!check){
+     check=window.bloom.call('printerCapabilities',{printer,settings:input,reuseRecent:true});
+     printerChecks.set(key,check);
+    }
+    const capabilities=await check.catch(error=>{
+     if(!canPrintWithoutCapabilities(input))throw error;
     });
     if(!capabilities)continue;
     if(isPdfPrinter(printer,capabilities.driver)){

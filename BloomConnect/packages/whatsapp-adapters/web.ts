@@ -9,6 +9,8 @@ export {whatsappAuthStateFromPage} from './auth-state';
 
 export type WebMessage={id:string;phone:string;name:string;kind:string;text:string;created:string;chat?:string;outgoing?:boolean;file?:{remote:string;name:string}};
 type Identity={chat:string;phone:string;name:string};
+type DirectChatModel={id:{_serialized:string};formattedTitle?:string;t?:number;isGroup:false};
+const DirectChat=Reflect.get(require('whatsapp-web.js'),'Chat') as new (client:Client,model:DirectChatModel)=>Chat;
 type QRInfo={clientId:string;generatedAt:string};
 type Callbacks={
   qrPending:(info:QRInfo)=>void;
@@ -353,9 +355,7 @@ export class WebAdapter {
       void this.captureIncoming(msg,outgoing).catch(error=>callbacks.diagnostic('Message capture failed',errorDetail(error)));
     };
     client.on('message',msg=>capture(msg));
-    client.on('message_create',msg=>{
-      if(msg.fromMe)capture(msg,true);
-    });
+    client.on('message_create',msg=>capture(msg,msg.fromMe));
     client.on('message_ack',(message,ack)=>{
       if(this.ready&&message.fromMe&&message.id?._serialized){
         const state=ack===-1?'failed':ack>=3?'read':ack===2?'delivered':ack===1?'sent':'';
@@ -531,31 +531,36 @@ export class WebAdapter {
   private async captureIncoming(msg:Message,outgoing=false){
     const chat=outgoing?msg.to:msg.from;
     if(msg.fromMe!==outgoing||!this.isDirect(chat))return;
-    const contact=await historyWithin(outgoing?this.client!.getContactById(chat):msg.getContact(),3_000).catch(()=>undefined);
-    const info=this.normalize(msg,await this.identity(chat,contact),outgoing);
+    const notifyName=(msg.rawData as {notifyName?:unknown}|undefined)?.notifyName;
+    const contact=!outgoing&&phoneFromChat(chat)?undefined:await historyWithin(outgoing?this.client!.getContactById(chat):msg.getContact(),3_000).catch(()=>undefined);
+    const info=this.normalize(msg,await this.identity(chat,contact,typeof notifyName==='string'?notifyName:undefined));
     if(info&&!this.stopped&&this.ready)this.callbacks.message(info);
   }
-  private normalize(msg:Message,identity:Identity,historical=false):WebMessage|undefined{
+  private normalize(msg:Message,identity:Identity):WebMessage|undefined{
     if(!msg.id?._serialized||!Number.isFinite(msg.timestamp)||Math.abs(msg.timestamp)>9_999_999_999)return;
     const id=msg.id._serialized;
     const kind=String(msg.type);
-    if(isWhatsAppSystemMessage(kind))return;
-    const rawName=(msg.rawData as {filename?:unknown}|undefined)?.filename;
-    const file=(kind==='image'||kind==='document')&&(msg.hasMedia||historical)
+    if(isWhatsAppSystemMessage(kind)||kind==='ciphertext')return;
+    const raw=msg.rawData as {filename?:unknown;caption?:unknown}|undefined;
+    const rawName=raw?.filename;
+    const file=(kind==='image'||kind==='document')
       ?{remote:id,name:typeof rawName==='string'&&rawName?rawName:kind==='image'?'WhatsApp image':'WhatsApp document'}:undefined;
     if(file&&msg.hasMedia){
       this.incoming.set(id,msg);
       if(this.incoming.size>250)this.incoming.delete(this.incoming.keys().next().value!);
     }
-    return {...identity,id,kind,text:file&&!msg.hasMedia?'':msg.body??'',created:new Date(msg.timestamp*1000).toISOString(),outgoing:msg.fromMe,file};
+    const text=file&&!msg.hasMedia?(typeof raw?.caption==='string'?raw.caption:''):msg.body??'';
+    return {...identity,id,kind,text,created:new Date(msg.timestamp*1000).toISOString(),outgoing:msg.fromMe,file};
   }
-  private async fetchHistory(chat:Chat,limit:number){
+  private async fetchHistory(chat:Chat,cachedOnly=false){
     let partial=false;
-    let messages=await historyWithin(chat.fetchMessages({limit})).catch(()=>{
+    const cached=()=>historyWithin(chat.fetchMessages({}),3_000);
+    const messages=await (cachedOnly?cached():historyWithin(chat.fetchMessages({limit:Number.MAX_SAFE_INTEGER}),30_000)).catch(()=>{
       partial=true;
-      return historyWithin(chat.fetchMessages({}),3_000).catch(()=>[] as Message[]);
+      return cachedOnly?[]:cached().catch(()=>[] as Message[]);
     });
-    if(!messages.length&&chat.lastMessage)messages=[chat.lastMessage];
+    const last=chat.lastMessage;
+    if(last&&!messages.some(message=>message.id?._serialized===last.id?._serialized))messages.push(last);
     return {messages,partial};
   }
   async syncChat(knownChats:string[],phone:string){
@@ -565,42 +570,60 @@ export class WebAdapter {
     const mapped=phone?this.chats.get(phone):undefined;
     if(mapped)candidates.push(mapped);
     if(phone)candidates.push(phone+'@c.us');
+    const messages=new Map<string,WebMessage>();
+    let found=false,partial=false;
     for(const id of new Set(candidates)){
       if(!this.isDirect(id))continue;
       const chat=await historyWithin(client.getChatById(id),3_000).catch(()=>undefined);
       if(!chat||chat.isGroup)continue;
+      found=true;
       const contact=await historyWithin(chat.getContact(),3_000).catch(()=>undefined);
       const identity=await this.identity(chat.id._serialized,contact,chat.name);
-      const {messages,partial}=await this.fetchHistory(chat,200);
-      const normalized=messages.flatMap(message=>{
-        const result=this.normalize(message,identity,true);
-        return result?[result]:[];
-      });
-      return {messages:normalized,partial};
+      const history=await this.fetchHistory(chat);
+      partial||=history.partial;
+      for(const message of history.messages){
+        const result=this.normalize(message,identity);
+        if(result)messages.set(result.id,result);
+      }
     }
+    if(found)return {messages:[...messages.values()],partial};
     throw new Error('WhatsApp Web could not find this chat. Open it on your phone and retry.');
   }
-  async syncHistory(consume:(messages:WebMessage[])=>void,isSaved?:(id:string)=>boolean){
+  async syncHistory(consume:(messages:WebMessage[])=>void,cachedOnly=false,needsIdentity?:(message:Message)=>boolean){
     if(!this.ready||this.stopped)throw new Error('Link WhatsApp Web before syncing chats.');
-    const chats=(await historyWithin(this.client!.getChats())).filter(chat=>!chat.isGroup&&this.isDirect(chat.id._serialized))
-      .sort((a,b)=>(b.timestamp??0)-(a.timestamp??0)).slice(0,30);
+    const client=this.client!;
+    const page=client.pupPage;
+    if(!page)throw new Error('WhatsApp Web browser is unavailable.');
+    // The library's getChats waits for group metadata and last-message lookups for every chat.
+    // Build lightweight direct-chat handles from the local collection instead.
+    const models=await historyWithin(page.evaluate(()=>{
+      type Model={id?:{_serialized?:string;$1?:string};formattedTitle?:string;t?:number};
+      type Collection={getModelsArray?:()=>Model[]};
+      const runtime=window as Window&{require?:(name:string)=>{Chat?:Collection;ChatCollection?:Collection}};
+      const load=(name:string)=>{try{return runtime.require?.(name)}catch{return undefined}};
+      const chats=load('WAWebChatCollection')?.ChatCollection??load('WAWebCollections')?.Chat;
+      if(!chats?.getModelsArray)return undefined;
+      return chats.getModelsArray().flatMap(chat=>{
+        const id=chat.id?._serialized??chat.id?.$1;
+        if(!id||!/^\d+@(?:c\.us|lid|s\.whatsapp\.net)$/.test(id))return [];
+        return [{id:{_serialized:id},formattedTitle:chat.formattedTitle,t:chat.t,isGroup:false as const}];
+      });
+    }));
+    const chats=(models?models.map(model=>new DirectChat(client,model)):await historyWithin(client.getChats()))
+      .filter(chat=>!chat.isGroup&&this.isDirect(chat.id._serialized))
+      .sort((a,b)=>(b.timestamp??0)-(a.timestamp??0));
     let failed=0;
     let imported=0;
     const sync=async(chat:Chat)=>{
       if(!this.ready||this.stopped)throw new Error('WhatsApp Web disconnected during chat sync.');
-      const latest=chat.lastMessage?.id?._serialized;
-      if(latest&&isSaved?.(latest)){
-        imported++;
-        return;
-      }
-      const [contact,{messages:history,partial}]=await Promise.all([
-        historyWithin(chat.getContact(),3_000).catch(()=>undefined),
-        this.fetchHistory(chat,20)
-      ]);
-      const identity=await this.identity(chat.id._serialized,contact,chat.name);
+      const {messages:history,partial}=await this.fetchHistory(chat,cachedOnly);
       if(partial)failed++;
-      const messages=history.flatMap(message=>{
-        const normalized=this.normalize(message,identity,true);
+      const pending=needsIdentity?history.filter(needsIdentity):history;
+      if(!pending.length)return;
+      const contact=phoneFromChat(chat.id._serialized)?undefined:await historyWithin(chat.getContact(),3_000).catch(()=>undefined);
+      const identity=await this.identity(chat.id._serialized,contact,chat.name);
+      const messages=pending.flatMap(message=>{
+        const normalized=this.normalize(message,identity);
         return normalized?[normalized]:[];
       });
       if(this.ready&&!this.stopped&&messages.length){
@@ -608,13 +631,20 @@ export class WebAdapter {
         imported+=messages.length;
       }
     };
-    for(let i=0;i<chats.length;i+=4)await Promise.all(chats.slice(i,i+4).map(sync));
+    for(let i=0;i<chats.length;i+=4){
+      if(!this.ready||this.stopped)throw new Error('WhatsApp Web disconnected during chat sync.');
+      const results=await Promise.allSettled(chats.slice(i,i+4).map(sync));
+      failed+=results.filter(result=>result.status==='rejected').length;
+    }
     return {chats:chats.length,failed,imported};
   }
   async download(id:string,signal:AbortSignal){
     signal.throwIfAborted();
     if(!this.ready)throw new Error('WhatsApp Web is offline.');
-    const msg=this.incoming.get(id)??await this.client!.getMessageById(id);
+    const cached=this.incoming.get(id);
+    this.incoming.delete(id);
+    const msg=cached?.hasMedia?cached:await historyWithin(this.client!.getMessageById(id));
+    signal.throwIfAborted();
     if(!msg?.hasMedia)throw new Error('WhatsApp Web no longer has this attachment.');
     const media=await msg.downloadMediaStream({chunkSize:1024*1024});
     if(!media)throw new Error('WhatsApp Web did not return the attachment.');

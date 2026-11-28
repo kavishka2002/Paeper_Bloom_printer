@@ -14,7 +14,6 @@ import {AppFooter} from './about';
 import {unreadInboxMessage} from './inbox-messages';
 import {groups,pageTitle,Sidebar} from './navigation';
 import {MotionConfig,PageHeader,PageSurface} from './design';
-import {preparePrint} from './pdf';
 import {useWorkspace} from './state';
 import {LicensedWorkspace} from './license';
 import '@fontsource-variable/inter';
@@ -89,4 +88,4 @@ function App(){
  {busy>0&&<div className="busy" role="status" aria-label="Processing"/>}
  <main data-page={s.view}><PageHeader title={title}/><PageSurface page={s.view}>{pages[s.view]}</PageSurface></main><AppFooter/></div>{status}<PdfPrintPopup/></div></ctx.Provider>;
 }
-if(new URLSearchParams(location.search).has('print'))void preparePrint();else createRoot(document.getElementById('root')!).render(<QueryClientProvider client={client}><MotionConfig reducedMotion="user"><LicensedWorkspace><App/></LicensedWorkspace></MotionConfig></QueryClientProvider>);
+createRoot(document.getElementById('root')!).render(<QueryClientProvider client={client}><MotionConfig reducedMotion="user"><LicensedWorkspace><App/></LicensedWorkspace></MotionConfig></QueryClientProvider>);

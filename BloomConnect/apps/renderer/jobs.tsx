@@ -4,7 +4,7 @@ import {useQueryClient} from '@tanstack/react-query';
 import {PhotoStudio} from './photos';
 import {BatchPdfStudio,type BatchPdfEditor} from './batch-pdfs';
 import type {PrinterCapabilities} from '../../packages/printing/windows';
-import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning,submissionDuplex,validateSubmissionPrinter} from '../../packages/printing/capabilities';
+import {canPrintWithoutCapabilities,isFileOutputPrinter,isPdfPrinter,isVirtualPrinter,printerSupplyWarning,validateSubmissionPrinter} from '../../packages/printing/capabilities';
 import {paperNames} from '../../packages/printing/paper';
 import {BookletWizard,DocumentPricingSettings,DuplexOptions,DuplexTest,PrintEstimate,ProfessionalSettings,SkipAutoMessages} from './print-settings';
 import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
@@ -239,14 +239,14 @@ function PdfStudio({attachmentId,batchEditor}:{attachmentId?:string;batchEditor?
   if([extra,reduction].some(value=>!Number.isInteger(value)||value<0||value>100000000))calculationError='Enter a charge and discount between LKR 0 and LKR 1,000,000.';
   else if(estimatedTotal<0)calculationError='Discount cannot exceed the subtotal plus the additional charge.';
  }
- const driverFallback=!!capabilityError&&canPrintWithoutCapabilities({...options,duplex:submissionDuplex(options.duplex,virtualPrinter)});
+ const driverFallback=!!capabilityError&&canPrintWithoutCapabilities(options);
  const printerListed=printers.some(item=>item.name===printer);
  const supplyWarning=capabilities?printerSupplyWarning(capabilities.error):'';
  let driverBlock=capabilityError&&!driverFallback?'Could not read the selected printer’s settings. Check the connection and refresh printers.':'';
  if(capabilities){try{validateSubmissionPrinter(schemas.print.parse({id:active?.id??'preview',...options}),capabilities,virtualPrinter)}catch(e){driverBlock=e instanceof Error?e.message:String(e)}}
  const printerNotice=!printerListed?(printers.length?'Select an available Windows printer.':'Windows returned no printers. Add one under Windows Settings > Printers & scanners, then refresh.'):
   pdfOutput?'This printer creates a PDF file. Choose a physical printer to print on paper.':
-  driverBlock||(driverFallback?'Windows could not read detailed capabilities. This document can print with the selected driver.':!capabilities?'Checking Windows printer capabilities.':supplyWarning||(virtualPrinter?'This virtual printer can open a Windows dialog or another app.':''));
+  driverBlock||(driverFallback?'Windows could not read the printer settings. Standard printing is available. Two-sided jobs use manual paper reloading.':!capabilities?'Checking Windows printer capabilities.':supplyWarning||(virtualPrinter?'This virtual printer can open a Windows dialog or another app.':''));
  const printBlock=batchEditor?'':active?.status==='Cancelled'?'Reopen the cancelled order before printing.':!printerListed||!pdfOutput&&(driverBlock||!capabilities&&!driverFallback)?printerNotice:'';
  const messageCustomer=active?active.customer_id:preview?.customer_id;
  useEffect(()=>setSkipAutoMessages(active?.skipAutoMessages??false),[messageCustomer,active?.id,active?.skipAutoMessages]);

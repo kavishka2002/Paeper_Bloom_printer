@@ -333,6 +333,7 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
  const root=await mkdtemp(join(tmpdir(),'bloom-web-test-'));
  const engine=start(root,'web');
  try{
+  await writeFile(join(root,'direct-chat-collection'),'Full library chat list unavailable');
   await engine.call('setup',{shop:'Web test',language:'en',printer:'',mono:1200,colour:3500,photo:10000});
   await engine.call('rule',{name:'Print Web PDF',trigger:'pdf',keyword:'',actions:['order'],text:'',enabled:true,graph:''});
   await engine.call('webConnect',null);
@@ -349,7 +350,7 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
     assert.deepEqual([qrImage.width,qrImage.height],[400,400]);
     await writeFile(join(root,'release-qr'),'Ready');
    }
-   if(state.jobs.length&&state.messages.length===6)break;
+   if(state.jobs.length&&state.messages.length===6&&state.attachments.some(file=>file.message_id==='fixture-old-pdf'&&file.status==='Ready'))break;
    await new Promise(resolve=>setTimeout(resolve,35));
   }
   assert.equal(sawQR,true);
@@ -365,7 +366,7 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   assert.equal(state.messages.find(m=>m.id==='phone-sent').direction,'outgoing');
   const historical=state.attachments.find(file=>file.message_id==='fixture-old-pdf');
   assert.equal(historical.name,'old-handout.pdf');
-  assert.equal(historical.status,'Available to download');
+  assert.equal(historical.status,'Ready',JSON.stringify(state.activity.filter(item=>item.kind==='Attachment processing issue')));
   await Promise.all(Array.from({length:2},async()=>{
     await engine.call('retryMedia',{id:historical.id});
     const snapshot=await engine.call('snapshot',null);
@@ -409,6 +410,15 @@ test('WhatsApp Web QR, direct message attachment intake, automation and replies 
   assert.equal(afterAutomation.activity.some(a=>a.kind==='Automation failed'&&a.detail==='Old chat automatic reply'),true);
   await engine.call('reply',{id:state.customers.find(c=>c.phone).id,text:'Received.'});
   assert.equal((await engine.call('snapshot',null)).messages.at(-1).direction,'outgoing');
+  await writeFile(join(root,'live-event-missed'),'Only WhatsApp history has this PDF');
+  let recovered;
+  for(let attempt=0;attempt<180;attempt++){
+   recovered=await engine.call('snapshot',null);
+   if(recovered.attachments.some(file=>file.message_id==='recovered-live-pdf'&&file.status==='Ready'))break;
+   await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  assert.equal(recovered.messages.filter(message=>message.id==='recovered-live-pdf').length,1);
+  assert.ok(recovered.attachments.some(file=>file.message_id==='recovered-live-pdf'&&file.status==='Ready'));
   await writeFile(join(root,'shop-data-marker'),'preserve');
   await engine.call('logout',null);
   assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');
@@ -656,6 +666,8 @@ test('WhatsApp Web reconnects automatically and restores the provider after rest
   const restarted=await waitFor('Connected',true);
   assert.equal(restarted.connection.sync,'Recent chats synced');
   assert.ok(restarted.messages.some(message=>message.id==='fixture-old-pdf'));
+  assert.equal(restarted.messages.filter(message=>message.id==='missed-pdf').length,1);
+  assert.ok(restarted.attachments.some(file=>file.message_id==='missed-pdf'&&file.name==='missed.pdf'));
   await engine.call('logout',null);
   await new Promise(resolve=>setTimeout(resolve,5500));
   assert.equal((await engine.call('snapshot',null)).connection.status,'Disconnected');

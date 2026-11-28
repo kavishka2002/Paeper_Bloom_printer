@@ -16,6 +16,7 @@ let clientCount=0;
 const record=(event,index)=>appendFileSync(join(root,'web-lifecycle.log'),event+':'+index+'\n');
 const incoming={
  fromMe:false,from:contact,id:{_serialized:id},timestamp:Math.floor(Date.now()/1000)-(process.env.BLOOMCONNECT_TEST_RECENT_INBOUND==='1'?60:36*3600),type:'document',body:'Please print',hasMedia:true,
+ rawData:{notifyName:'Web fixture customer',caption:'Please print'},
  async getContact(){return {id:{_serialized:contact},name:'Web fixture customer'}},
  async downloadMediaStream(){return {stream:Readable.from([Buffer.from('%PDF-1.7\n% test attachment')])}}
 };
@@ -31,13 +32,13 @@ class Client extends EventEmitter{
  this.emit('authenticated');
  this.emit('ready');
  if(!this.isSecondAccount){
-  this.emit('message',incoming);
-  this.emit('message',incoming);
+  this.emit('message',{...incoming,hasMedia:false});
+  this.emit('message',{...incoming,hasMedia:false});
   this.emit('message',{...incoming,from:'94710000000@g.us',id:{_serialized:'group'}});
   this.emit('message',{...incoming,id:{_serialized:'system-only'},type:'notification_template',hasMedia:false});
   this.emit('message_create',{...incoming,fromMe:true,to:contact,id:{_serialized:'phone-sent'},type:'chat',hasMedia:false,body:'Sent from phone'});
   this.emit('message_create',{...incoming,fromMe:true,to:contact,id:{_serialized:'phone-sent-pdf'},rawData:{filename:'sent-handout.pdf'}});
-  this.emit('message',{...incoming,from:'12345@lid',id:{_serialized:'lid-direct'},type:'chat',hasMedia:false,body:'LID direct message',getContact:async()=>undefined});
+  this.emit('message_create',{...incoming,from:'12345@lid',id:{_serialized:'lid-direct'},type:'chat',hasMedia:false,body:'LID direct message',rawData:undefined,getContact:async()=>undefined});
  }else this.emit('message',secondIncoming);
  }
  async initialize(){
@@ -45,7 +46,12 @@ class Client extends EventEmitter{
  writeFileSync(join(root,'whatsapp-web','session','Default','Preferences'),'fixture session');
  const socketModel={};
  const connectionModel={Conn:{ref:'synthetic-qr-ref'}};
- global.window={require:name=>name==='WAWebSocketModel'?socketModel:name==='WAWebConnModel'?connectionModel:name==='WAWebUserPrefsMeUser'?{
+ global.window={require:name=>name==='WAWebChatCollection'&&existsSync(join(root,'direct-chat-collection'))?{
+  ChatCollection:{getModelsArray:()=>[
+   {id:{$1:this.message.from},formattedTitle:'Web fixture customer',t:this.message.timestamp},
+   {id:{$1:'123@g.us'},get formattedTitle(){throw new Error('Group metadata must not be read')}},
+  ]}
+ }:name==='WAWebSocketModel'?socketModel:name==='WAWebConnModel'?connectionModel:name==='WAWebUserPrefsMeUser'?{
   getMaybeMePnUser:()=>process.env.BLOOMCONNECT_TEST_WEB_COMPAT_INJECT_ERROR==='1'&&existsSync(join(root,'release-qr'))?{_serialized:this.account}:undefined,
   getMaybeMeLidUser:()=>undefined
  }:{}};
@@ -106,16 +112,24 @@ class Client extends EventEmitter{
  record('initialized',this.index);
  }
  async getChats(){
+ if(existsSync(join(root,'direct-chat-collection')))throw new Error('The full chat list is unavailable');
  if(existsSync(join(root,'delay-initial-chats'))&&!this.chatListRequested){
   this.chatListRequested=true;
   return [];
  }
- return [{
+ return this.directChats();
+ }
+ directChats(){return [{
  id:{_serialized:this.message.from},isGroup:false,name:this.isSecondAccount?'Second account customer':'Web fixture customer',
  lastMessage:existsSync(join(root,'skip-cached-history'))?this.message:undefined,
  getContact:()=>this.message.getContact(),
- fetchMessages:async()=>{
-  if(existsSync(join(root,'skip-cached-history')))throw new Error('Already cached chat should not fetch its history');
+ fetchMessages:async({limit})=>{
+  if(limit===undefined&&existsSync(join(root,'live-event-missed')))return [
+   {...incoming,id:{_serialized:'recovered-live-pdf'},rawData:{filename:'recovered-live.pdf'},timestamp:incoming.timestamp+120}
+  ];
+  if(existsSync(join(root,'skip-cached-history')))return [
+   {...incoming,id:{_serialized:'missed-pdf'},rawData:{filename:'missed.pdf'},timestamp:incoming.timestamp-300}
+  ];
   return !this.isSecondAccount?[
    {...incoming,id:{_serialized:'fixture-old-pdf'},rawData:{filename:'old-handout.pdf'},timestamp:incoming.timestamp-600},
    {...incoming,id:{_serialized:'fixture-old-out'},fromMe:true,type:'chat',hasMedia:false,body:'Earlier reply',timestamp:incoming.timestamp-500}
@@ -123,10 +137,10 @@ class Client extends EventEmitter{
  }]}
  async getChatById(id){
  if(id!==this.message.from)throw new Error('Unexpected chat');
-  const [chat]=await this.getChats();
+  const [chat]=this.directChats();
  if(this.isSecondAccount)return {...chat,fetchMessages:async()=>[secondIncoming]};
   return {...chat,fetchMessages:async({limit})=>{
-   if(limit===200)throw new Error('Earlier WhatsApp history is unavailable');
+   if(limit===Number.MAX_SAFE_INTEGER)throw new Error('Earlier WhatsApp history is unavailable');
    if(limit!==undefined)throw new Error('Expected the cached-history fallback');
    return [
     {...incoming,id:{_serialized:'deep-document'},rawData:{filename:'older-notes.pdf'},timestamp:incoming.timestamp-8000},
@@ -157,7 +171,9 @@ Module._load=function(request,...args){
   let connected=true;
   return Object.assign(new EventEmitter(),{wsEndpoint:()=> 'ws://fixture',userAgent:async()=> 'Test browser',version:async()=> 'Chrome/fixture',isConnected:()=>connected,close:async()=>{if(connected){connected=false;record('browser-close',clientCount)}}});
  }};
- if(request==='whatsapp-web.js')return {Client,LocalAuth:class{
+ if(request==='whatsapp-web.js')return {Client,Chat:class{
+  constructor(client,model){Object.assign(this,client.directChats()[0],{id:model.id,name:model.formattedTitle,timestamp:model.t})}
+ },LocalAuth:class{
   constructor(options){this.dataPath=options.dataPath}
   async afterBrowserInitialized(){}
   async logout(){record('auth-clear',clientCount);await rm(join(this.dataPath,'session'),{recursive:true,force:true})}

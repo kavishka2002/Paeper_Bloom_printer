@@ -1,5 +1,5 @@
 import {createHash,randomUUID} from 'node:crypto';
-import {createWriteStream} from 'node:fs';
+import {createReadStream,createWriteStream} from 'node:fs';
 import {mkdir,open,readdir,rename,unlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {Readable,Transform} from 'node:stream';
@@ -37,7 +37,17 @@ export async function storeDownload<T extends {extension:string;mime:string;need
     const digest=hash.digest('hex'),name=digest+'.'+type.extension;
     if(!storedMediaName.test(name))throw new Error('Unsupported attachment format.');
     signal.throwIfAborted();
-    await rename(temp,join(directory,name));
+    const destination=join(directory,name);
+    try{
+      await rename(temp,destination);
+    }catch(error){
+      // Windows can reject replacement while another download or preview has this file open.
+      const existing=createHash('sha256');
+      try{
+        for await(const chunk of createReadStream(destination,{signal}))existing.update(chunk);
+      }catch{throw error}
+      if(existing.digest('hex')!==digest)throw error;
+    }
     return {...type,path:name,hash:digest,bytes};
   }finally{await unlink(temp).catch(()=>{})}
 }

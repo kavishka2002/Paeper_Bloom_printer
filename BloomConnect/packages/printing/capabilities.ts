@@ -1,4 +1,4 @@
-import {isAutomaticDuplex,isManualDuplex,type DuplexMode} from './duplex';
+import {isAutomaticDuplex,type DuplexMode} from './duplex';
 import type {PrintSettings,PrintSettingsInput} from './settings';
 import type {PrinterCapabilities} from './windows';
 import {paperDimensions} from './paper';
@@ -25,7 +25,7 @@ export function printerSupplyWarning(code:number){
   return code===3?'The printer reports low paper.':code===5?'The printer reports low toner.':'';
 }
 export function canPrintWithoutCapabilities(s:PrintSettingsInput){
-  return s.paper!=='Custom'&&(s.duplex==='simplex'||isManualDuplex(s.duplex))&&s.tray===undefined&&!s.driverDpi&&s.scaling!=='printable'&&!s.photoBatch&&!Object.keys(s.photoItems??{}).length;
+  return s.paper!=='Custom'&&s.tray===undefined&&!s.driverDpi&&s.scaling!=='printable'&&!s.photoBatch&&!Object.keys(s.photoItems??{}).length;
 }
 export function validatePrinter(s:PrintSettings,c:PrinterCapabilities){
   if(c.name!==s.printer)throw new Error('Printer capability data does not match this printer.');

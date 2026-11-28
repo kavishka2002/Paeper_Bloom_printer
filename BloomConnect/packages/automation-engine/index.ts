@@ -424,13 +424,21 @@ async function finishConfirmedOrder(id:string){
   await automation({id,jobId:id,kind:'print-completed',customer:order.customer_id});
   await automation({id,jobId:id,kind:'pickup',customer:order.customer_id});
 }
+function ingestAttachment(customer:string,msg:WebMessage,imports:string[]){
+  if(!msg.file)return;
+  const existing=row<{id:string;status:string}>('SELECT id,status FROM attachments WHERE message_id=?',msg.id);
+  const id=existing?.id??randomUUID();
+  if(!existing)run('INSERT INTO attachments (id,customer_id,message_id,name,status,created,remote) VALUES (?,?,?,?,?,?,?)',id,customer,msg.id,basename(msg.file.name).slice(0,180),msg.outgoing?'Available to download':'Pending',msg.created,msg.file.remote);
+  if(!msg.outgoing&&(!existing||existing.status==='Available to download'||existing.status==='Pending'))imports.push(id);
+}
 function ingest(account:string,msg:WebMessage,events:Event[],imports:string[],historical=false){
   if(account.startsWith('web:')&&isWhatsAppSystemMessage(msg.kind))return;
   const prior=row<Message>('SELECT * FROM messages WHERE id=?',msg.id);
   if(prior&&(historical||prior.status!=='history'||prior.direction!=='incoming')){
-    if(msg.file&&!row('SELECT id FROM attachments WHERE message_id=?',msg.id)){
-      run("INSERT INTO attachments (id,customer_id,message_id,name,status,created,remote) VALUES (?,?,?,?,'Available to download',?,?)",randomUUID(),prior.customer_id,msg.id,basename(msg.file.name).slice(0,180),msg.created,msg.file.remote);
+    if(prior.kind==='ciphertext'&&msg.kind!=='ciphertext'){
+      run('UPDATE messages SET kind=?,body=? WHERE id=?',msg.kind,msg.text.slice(0,4096),msg.id);
     }
+    ingestAttachment(prior.customer_id,msg,imports);
     return;
   }
   const alias=msg.chat?'webContact:'+account+':'+msg.chat:undefined;
@@ -446,14 +454,9 @@ function ingest(account:string,msg:WebMessage,events:Event[],imports:string[],hi
   if(alias&&mapped!==customer)store.save(alias,customer);
   run('INSERT OR IGNORE INTO conversations VALUES (?,?)',account,customer);
   const body=msg.text.slice(0,4096);
-  if(prior)run("UPDATE messages SET body=?,status='received',unread=1 WHERE id=?",body,msg.id);
+  if(prior)run("UPDATE messages SET body=?,kind=?,status='received',unread=1 WHERE id=?",body,msg.kind,msg.id);
   else run('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)',msg.id,account,customer,body,msg.kind,msg.outgoing?'outgoing':'incoming',historical||msg.outgoing?'history':'received',msg.created,historical||msg.outgoing?0:1);
-  if(msg.file){
-    const existing=row<{id:string}>('SELECT id FROM attachments WHERE message_id=?',msg.id);
-    const id=existing?.id??randomUUID();
-    if(!existing)run('INSERT INTO attachments (id,customer_id,message_id,name,status,created,remote) VALUES (?,?,?,?,?,?,?)',id,customer,msg.id,basename(msg.file.name).slice(0,180),historical||msg.outgoing?'Available to download':'Pending',msg.created,msg.file.remote);
-    if(!historical&&!msg.outgoing)imports.push(id);
-  }
+  ingestAttachment(customer,msg,imports);
   if(historical||msg.outgoing)return;
   events.push({id:msg.id,kind:'message',customer,text:body});
 }
@@ -463,6 +466,52 @@ function processIncoming(events:Event[],imports:string[]){
   for(const id of imports)void receiveMedia(id).catch(()=>{});
 }
 let syncingWeb:WebAdapter|undefined;
+let recoveringWeb:WebAdapter|undefined;
+let webRecoveryFailures=0;
+let webHistoryRetryAt=0;
+const webSyncRetryStatus='Chat sync interrupted. Retrying automatically…';
+function saveWebHistory(current:WebAdapter,messages:WebMessage[]){
+  if(web!==current||connection.status!=='Connected')return;
+  const imports:string[]=[];
+  store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],imports,true)});
+  processIncoming([],imports);
+}
+setInterval(async()=>{
+  const current=web;
+  if(!current||connection.status!=='Connected'||recoveringWeb===current)return;
+  recoveringWeb=current;
+  try{
+    const lookup=db.prepare('SELECT m.kind,a.id AS attachment FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.account_id=? AND m.id=?');
+    const result=await current.syncHistory(messages=>saveWebHistory(current,messages),true,message=>{
+      const id=message.id?._serialized;
+      if(!id)return false;
+      const saved=lookup.get(current.account,id) as {attachment:string|null;kind:string}|undefined;
+      return !saved||saved.kind==='ciphertext'||
+        ((message.type==='image'||message.type==='document')&&!saved.attachment);
+    });
+    if(result.chats&&result.failed===result.chats&&!result.imported)throw new Error('WhatsApp did not return messages for any direct chat.');
+    if(web===current&&connection.status==='Connected'){
+      webRecoveryFailures=0;
+      if(syncingWeb!==current&&connection.sync===webSyncRetryStatus){
+        connection={...connection,sync:result.chats?'Recent chats synced':'No direct chats found on WhatsApp Web'};
+        changed();
+      }
+      if(syncingWeb!==current&&webHistoryRetryAt&&webHistoryRetryAt<=Date.now())void syncWebChats();
+    }
+  }catch(error){
+    if(web===current&&connection.status==='Connected'){
+      webRecoveryFailures++;
+      if(webRecoveryFailures===1)store.audit('WhatsApp message recovery',error instanceof Error?error.message:'Cached history could not be loaded.');
+      if(webRecoveryFailures>=3)retryWeb();
+      else if(syncingWeb!==current&&connection.sync!==webSyncRetryStatus){
+        connection={...connection,sync:webSyncRetryStatus};
+        changed();
+      }
+    }
+  }finally{
+    if(recoveringWeb===current)recoveringWeb=undefined;
+  }
+},15_000).unref();
 async function syncChatDocuments({id}:Input<'webChatSync'>){
   const current=web;
   if(!current||connection.status!=='Connected')throw new Error('Connect WhatsApp Web before loading documents.');
@@ -473,11 +522,12 @@ async function syncChatDocuments({id}:Input<'webChatSync'>){
     .map(item=>item.key.slice(prefix.length));
   const {messages,partial}=await current.syncChat(aliases,customer.phone);
   if(web!==current||connection.status!=='Connected')throw new Error('WhatsApp Web disconnected while loading documents.');
-  store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],[],true)});
+  const imports:string[]=[];
+  store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],imports,true)});
+  processIncoming([],imports);
   const documents=rows<{id:string}>(
-    "SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.account_id=? AND a.customer_id=? AND a.status='Available to download' ORDER BY a.created DESC LIMIT 20",
+    "SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.account_id=? AND a.customer_id=? AND a.status='Available to download' ORDER BY a.created DESC",
     current.account,id);
-  changed();
   void (async()=>{
     let next=0;
     const download=async()=>{
@@ -490,17 +540,14 @@ async function syncChatDocuments({id}:Input<'webChatSync'>){
   })();
   return {messages:messages.length,documents:messages.filter(message=>message.file).length,partial};
 }
-async function syncWebChats(onConnect=false,skipSaved=false){
+async function syncWebChats(onConnect=false){
   const current=web;
   if(!current||connection.status!=='Connected')throw new Error('Link WhatsApp Web before syncing chats.');
   if(syncingWeb===current)return;
   syncingWeb=current;
+  webHistoryRetryAt=0;
   connection={...connection,sync:'Syncing recent chats…'};changed();
-  const sync=()=>current.syncHistory(messages=>{
-      if(web!==current)return;
-      store.atomic(()=>{for(const message of messages)ingest(current.account,message,[],[],true)});
-      changed();
-  },skipSaved?id=>!!row('SELECT id FROM messages WHERE account_id=? AND id=?',current.account,id):undefined);
+  const sync=()=>current.syncHistory(messages=>saveWebHistory(current,messages));
   try{
     let result;
     if(onConnect){
@@ -512,13 +559,18 @@ async function syncWebChats(onConnect=false,skipSaved=false){
       }
     }else result=await sync();
     if(web===current&&connection.status==='Connected'){
+      if(result.failed&&!result.imported)webHistoryRetryAt=Date.now()+60_000;
       const sync=result.imported
         ?'Recent chats synced'+(result.failed?' · Some history could not be loaded':'')
-        :result.chats?'No messages returned yet. Try Sync recent chats again.':'No direct chats found on WhatsApp Web';
+        :result.failed?webSyncRetryStatus:result.chats?'Waiting for WhatsApp messages. Auto-sync is on.':'No direct chats found on WhatsApp Web';
       connection={...connection,sync};
     }
-  }catch{
-    if(web===current)connection={...connection,sync:'Chat sync failed. Try Sync recent chats again.'};
+  }catch(error){
+    if(web===current&&connection.status==='Connected'){
+      webHistoryRetryAt=Date.now()+60_000;
+      connection={...connection,sync:webSyncRetryStatus};
+      store.audit('WhatsApp chat sync',error instanceof Error?error.message:'Chat history could not be loaded.');
+    }
   }finally{
     if(syncingWeb===current)syncingWeb=undefined;
     changed();
@@ -567,14 +619,15 @@ async function connectWeb(_input:null=null,automatic=false){
       },
       ready(account,phone){
         if(web!==next||connection.status==='Connected')return;
-        const restoring=store.setting('lastWebAccount')===account;
         run('INSERT INTO whatsapp_accounts VALUES (?,?) ON CONFLICT(id) DO UPDATE SET phone=excluded.phone',account,phone);
         store.save('lastWebAccount',account);
+        webRecoveryFailures=0;
+        webHistoryRetryAt=0;
         webRetryAttempt=0;
         if(webRetry){clearTimeout(webRetry);webRetry=undefined}
         connection={status:'Connected',mode:'web',phone,webhook:false};changed();
-        void syncWebChats(true,restoring);
-        for(const a of rows<{id:string}>("SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.status='Pending' AND m.account_id=? LIMIT 20",account))void receiveMedia(a.id).catch(()=>{});
+        void syncWebChats(true);
+        for(const a of rows<{id:string}>("SELECT a.id FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.account_id=? AND a.remote IS NOT NULL AND (a.status='Pending' OR (a.status='Available to download' AND m.direction='incoming')) ORDER BY a.created DESC",account))void receiveMedia(a.id).catch(()=>{});
       },
       offline(detail,retry=false){
         if(web===next){

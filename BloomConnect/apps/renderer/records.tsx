@@ -15,11 +15,8 @@ export function InboxView(){
  const accountScoped=data.connection.mode==='web'||['Connected','API reachable'].includes(data.connection.status);
  const webConnected=data.connection.mode==='web'&&data.connection.status==='Connected';
  const selectedInInbox=selectedCustomer&&(!accountScoped||data.messages.some(message=>message.customer_id===selectedCustomer.id&&visibleInboxMessage(message)))?selectedCustomer:undefined;
- const [previewCustomer,setPreviewCustomer]=useState<string>();
- const previewInInbox=data.connection.mode==='web'&&data.messages.some(message=>message.customer_id===previewCustomer&&visibleInboxMessage(message))?previewCustomer:undefined;
- const latestCustomer=data.connection.mode==='web'&&!selectedInInbox?data.messages.findLast(visibleInboxMessage)?.customer_id:undefined;
- const active=selectedInInbox??data.customers.find(customer=>customer.id===(previewInInbox??latestCustomer));
- useEffect(()=>{if(!previewInInbox&&latestCustomer)setPreviewCustomer(latestCustomer)},[previewInInbox,latestCustomer]);
+ const latestCustomer=!selectedInInbox?data.messages.findLast(visibleInboxMessage)?.customer_id:undefined;
+ const active=selectedInInbox??data.customers.find(customer=>customer.id===latestCustomer);
  const [syncingChat,setSyncingChat]=useState('');
  const [chatSync,setChatSync]=useState<{id:string;text:string}>();
  const [selectedFiles,setSelectedFiles]=useState<string[]>([]);

@@ -180,7 +180,7 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
   if(isPdfPrinter(input.printer))throw new Error('Use Save as PDF for the Microsoft Print to PDF device.');
   const [capabilities,files]=await Promise.all([
     queryCapabilities(join(__dirname,'windows.ps1'),input.printer,verified,true).catch(error=>{
-      if(!canPrintWithoutCapabilities({...verified,duplex:submissionDuplex(verified.duplex,isVirtualPrinter(input.printer))}))throw error;
+      if(!canPrintWithoutCapabilities(verified))throw error;
       return undefined;
     }),
     test?[]:selectedPrintFiles(input),
@@ -192,7 +192,7 @@ async function submitPrintOrder(input:Input<'print'>,test=false){
   const fileOutput=isFileOutputPrinter(capabilities?.port??'');
   const virtual=isVirtualPrinter(input.printer)||isVirtualPrinter(capabilities?.driver??'')||fileOutput;
   if(test&&virtual)throw new Error('Select a physical printer to test double-sided output.');
-  const outputMode=submissionDuplex(verified.duplex,virtual,capabilities?.duplex);
+  const outputMode=submissionDuplex(verified.duplex,virtual,capabilities?.duplex??false);
   const manual=isManualDuplex(outputMode);
   if(capabilities)validateSubmissionPrinter(verified,capabilities,virtual);
   if(capabilities&&Object.keys(verified.photoItems).length){
@@ -425,7 +425,7 @@ else void app.whenReady().then(async()=>{
       case 'appInfo':return {version:app.getVersion()};
       case 'supportAction':return performSupportAction(schemas.supportAction.parse(input).action,url=>shell.openExternal(url),value=>clipboard.writeText(value));
       case 'printers':return main.webContents.getPrintersAsync();
-      case 'printerCapabilities':{const request=schemas.printerCapabilities.parse(input);return queryCapabilities(join(__dirname,'windows.ps1'),request.printer,request.settings?normalizedSettings(request.settings):undefined)}
+      case 'printerCapabilities':{const request=schemas.printerCapabilities.parse(input);return queryCapabilities(join(__dirname,'windows.ps1'),request.printer,request.settings?normalizedSettings(request.settings):undefined,request.reuseRecent)}
       case 'testDuplex':{
         const request=schemas.testDuplex.parse(input);
         await printOrder({id:'Duplex test',...request,copies:1,colour:false,range:'',rotation:0,fit:'contain',layout:'single'},true);
@@ -729,7 +729,7 @@ else void app.whenReady().then(async()=>{
         await new Promise(resolve=>setTimeout(resolve,250));
         await writeFile(join(root,'advanced-studio-booklet.png'),(await main.capturePage()).toPNG());
         main.webContents.debugger.detach();
-        const options=schemas.print.parse({id:result.id,printer:'Smoke only - no submission',paper:'A4',renderDpi:300,copies:1,colour:false,landscape:true,duplex:'shortEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:true,binding:'left',marginMm:5,gapMm:2,borders:true});
+        const options=schemas.print.parse({id:result.id,printer:'Smoke only - no submission',paper:'A4',renderDpi:300,copies:2,collate:true,colour:false,landscape:true,duplex:'shortEdge',range:'',rotation:0,fit:'contain',layout:'single',nup:2,booklet:true,binding:'left',marginMm:5,gapMm:2,borders:true});
         const printWindow=new BrowserWindow(printWindowOptions);lock(printWindow);
         try{
           const prepared=new Promise<void>((resolve,reject)=>{
@@ -737,12 +737,16 @@ else void app.whenReady().then(async()=>{
             printViews.set(printWindow.webContents.id,{data:{input:options,files:[{id:result.file}]},ready:error=>{clearTimeout(timer);error?reject(new Error(error)):resolve()}});
           });
           await Promise.all([printWindow.loadURL(index+'?print=1'),prepared]);
-          const output=await printWindow.webContents.executeJavaScript(`({sides:document.querySelectorAll('.sheet').length,first:document.querySelector('.sheet canvas').toDataURL(),dpi:window.__printManifest.renderDpi})`);
+          const output=await printWindow.webContents.executeJavaScript(`(() => {
+            const sheets=[...document.querySelectorAll('.sheet canvas')];
+            return {sides:sheets.length,first:sheets[0].toDataURL(),dpi:window.__printManifest.renderDpi,
+              copiesMatch:sheets.slice(0,6).every((sheet,index)=>sheet.toDataURL()===sheets[index+6]?.toDataURL())};
+          })()`);
           if(output.dpi!==300)throw new Error('Booklet must retain its selected 300 DPI.');
-          if(output.sides!==6)throw new Error('Booklet must prepare six imposed sides.');
+          if(output.sides!==12||!output.copiesMatch)throw new Error('The two booklet copies must each contain the same six imposed sides in order.');
           if(output.first!==result.preview)throw new Error('Preview does not match the submitted raster layout.');
           const printers=await main.webContents.getPrintersAsync();
-          await writeFile(join(root,'advanced-print-smoke.json'),JSON.stringify({logicalPages:Number(result.selectedPages),physicalSheets:Number(result.sheets),imposedSides:output.sides,renderDpi:output.dpi,previewMatchesPreparedSide:true,threeUpHandoutVerified:true,bookletWizardVerified:true,availablePrinters:printers.map(printer=>printer.name),physicalPrintingExecuted:false}));
+          await writeFile(join(root,'advanced-print-smoke.json'),JSON.stringify({logicalPages:Number(result.selectedPages),physicalSheets:Number(result.sheets),imposedSides:output.sides/2,preparedCopies:2,renderDpi:output.dpi,previewMatchesPreparedSide:true,threeUpHandoutVerified:true,bookletWizardVerified:true,availablePrinters:printers.map(printer=>printer.name),physicalPrintingExecuted:false}));
         }finally{printViews.delete(printWindow.webContents.id);printWindow.destroy()}
       }
 

@@ -121,9 +121,21 @@ export function inspectDocument(id:string,analyse=true,source?:Source):Promise<D
   return pending;
 }
 type Source={file?:FileReference;doc?:Awaited<ReturnType<typeof pdf>['promise']>;img?:HTMLImageElement;close:()=>Promise<void>};
-async function openSource(id:string):Promise<Source>{
+async function openSource(id:string,preloadPdf=false):Promise<Source>{
   const file=await window.bloom.call('fileReference',{id});
-  if(file.mime==='application/pdf'){const task=pdf(file);try{return {file,doc:await task.promise,close:()=>task.destroy()}}catch(e){await task.destroy();throw e}}
+  if(file.mime==='application/pdf'){
+    let source:FileReference|Uint8Array=file;
+    // Small PDFs used for printing can load in one request without repeated range round trips.
+    if(preloadPdf&&file.bytes<=8*1024**2){
+      const response=await fetch(file.url);
+      if(!response.ok)throw new Error('Could not read the saved PDF. Reopen the attachment and try again.');
+      const bytes=new Uint8Array(await response.arrayBuffer());
+      if(bytes.length!==file.bytes)throw new Error('The saved PDF is incomplete.');
+      source=bytes;
+    }
+    const task=pdf(source);
+    try{return {file,doc:await task.promise,close:()=>task.destroy()}}catch(e){await task.destroy();throw e}
+  }
   return {file,img:await photoImage(id,file),close:async()=>{}};
 }
 /** The same compositor is used for preview, Save as PDF, native GDI and Electron printing. */
@@ -429,7 +441,7 @@ export async function preparePrint(){
     if(photoFiles.length){const infos=await Promise.all(photoFiles.map(f=>inspectDocument(f.id))),plan=planPhotos(options,infos);all.push({file:photoFiles[0],info:infos[0],plan,sides:plannedOutput(plan)})}
     for(const file of files.filter(f=>!options.photoBatch&&!options.photoItems[f.id])){
       // Keep one source open so single-file jobs can reuse the PDF worker after inspection.
-      if(files.length===1)singleSource=await openSource(file.id);
+      if(files.length===1)singleSource=await openSource(file.id,true);
       const info=await inspectDocument(file.id,needsPixelAnalysis(options),singleSource),plan=planDocument({...options,copies:options.fileCopies[file.id]??options.copies},info);
       if(plan.needsConfirmation)throw new Error('Confirm uncertain colour analysis before printing.');
       all.push({file,info,plan,sides:plannedOutput(plan)});
@@ -443,10 +455,27 @@ export async function preparePrint(){
     const style=document.createElement('style');style.textContent=`@page{size:${width}mm ${height}mm;margin:0}html,body,#root{margin:0;background:white!important}.sheet{width:${width}mm;height:${height}mm;break-after:page;overflow:hidden}.sheet:last-child{break-after:auto}.sheet canvas{display:block;width:100%;height:100%}`;document.head.append(style);
     const faces:boolean[]=[];let hasColour=false;
     for(const item of all){
-      const source=item.plan.settings.photoBatch||item.sides.some(side=>side.placements.some(p=>p.file))?undefined:singleSource??await openSource(item.file.id);
+      const source=item.plan.settings.photoBatch||item.sides.some(side=>side.placements.some(p=>p.file))?undefined:singleSource??await openSource(item.file.id,true);
       const plan={...item.plan,settings:{...item.plan.settings,renderDpi}};
       const images=new Map<string,HTMLImageElement>();
-      try{for(const side of item.sides){const sheet=document.createElement('div');sheet.className='sheet';const canvas=document.createElement('canvas');if(!source)await renderPhotoSheet(plan,side,canvas,images);else await renderPlannedSide(source,item.info,plan,side,canvas);sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour'}}finally{if(source!==singleSource)await source?.close()}
+      // The copy planner repeats the same side objects in submission order.
+      const renderedSides=new Map<PlannedSide,HTMLCanvasElement>();
+      try{
+        for(const side of item.sides){
+          const sheet=document.createElement('div'),canvas=document.createElement('canvas');
+          sheet.className='sheet';
+          const rendered=renderedSides.get(side);
+          if(rendered){
+            canvas.width=rendered.width;canvas.height=rendered.height;
+            canvas.getContext('2d')!.drawImage(rendered,0,0);
+          }else{
+            if(source)await renderPlannedSide(source,item.info,plan,side,canvas);
+            else await renderPhotoSheet(plan,side,canvas,images);
+            if(plan.settings.copies>1)renderedSides.set(side,canvas);
+          }
+          sheet.append(canvas);root.append(sheet);faces.push(side.back);hasColour||=side.ink==='colour';
+        }
+      }finally{if(source!==singleSource)await source?.close()}
     }
     const preparedSource=singleSource;
     singleSource=undefined;

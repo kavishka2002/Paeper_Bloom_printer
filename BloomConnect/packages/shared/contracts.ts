@@ -22,7 +22,7 @@ export const schemas = {
   combineScans:z.object({token:id,pages:z.array(z.object({id,rotation:z.union([z.literal(0),z.literal(90),z.literal(180),z.literal(270)])})).min(1).max(40),layout:z.enum(['a4','original']),marginMm:z.number().min(0).max(30)}),
   exportScannedPdf:z.object({id}),
   printEstimate:calculationSchema,
-  printerCapabilities:z.object({printer:label,settings:printSettingsSchema.optional()}),
+  printerCapabilities:z.object({printer:label,settings:printSettingsSchema.optional(),reuseRecent:z.boolean().optional()}),
   printerDialog:z.object({printer:label,kind:z.enum(['preferences','properties'])}),
   testDuplex:printSettingsSchema.pick({printer:true,paper:true,customPaper:true,orientation:true,landscape:true,duplex:true}).refine(settings=>settings.duplex!=='simplex'&&settings.orientation!=='auto','Choose double-sided printing and a fixed orientation.'),
   openPrinterSettings:z.null(),

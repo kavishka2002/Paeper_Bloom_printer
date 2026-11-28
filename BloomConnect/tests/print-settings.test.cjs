@@ -1,5 +1,5 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const {buildSync}=require('esbuild');
-const code=buildSync({stdin:{contents:"export * from './packages/printing/plan';export * from './packages/printing/duplex';export * from './packages/printing/image-processing';export * from './packages/printing/photo-pricing';export * from './packages/printing/settings';export * from './packages/printing/raster-budget';export {submissionDuplex,validateSubmissionPrinter} from './packages/printing/capabilities';export {validatePrinter} from './packages/printing/windows';",resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'cjs'}).outputFiles[0].text;
+const code=buildSync({stdin:{contents:"export * from './packages/printing/plan';export * from './packages/printing/duplex';export * from './packages/printing/image-processing';export * from './packages/printing/photo-pricing';export * from './packages/printing/settings';export * from './packages/printing/raster-budget';export {canPrintWithoutCapabilities,submissionDuplex,validateSubmissionPrinter} from './packages/printing/capabilities';export {validatePrinter} from './packages/printing/windows';",resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'cjs'}).outputFiles[0].text;
 const mod={exports:{}};new Function('module','exports','require',code)(mod,mod.exports,require);
 const {sharpenPixels,enhancePixels,effectiveDpi,effectivePhotoPricing,quotePhotos,photoSizeKey,planPhotos,reorderPhotoFrames,tightPhotoFrame,constrainPhotoFrame,planDocument,plannedOutput,placementGeometry,analysePixels,normalizedSettings,validatePrinter}=mod.exports;
 const base={printer:'Test',paper:'A4',copies:1,colour:false,landscape:false,duplex:'simplex',range:'',rotation:0,fit:'contain',layout:'single'};
@@ -149,6 +149,17 @@ test('missing driver paper metadata permits standard paper for manual duplex',()
  const settings=normalizedSettings({...base,colour:true,duplex:'manualLongEdge'});
  assert.doesNotThrow(()=>mod.exports.validateSubmissionPrinter(settings,caps));
  assert.throws(()=>mod.exports.validateSubmissionPrinter({...settings,scaling:'printable'},caps),/paper size/);
+});
+
+test('document printing can fall back when a copier does not return driver capabilities',()=>{
+ const {canPrintWithoutCapabilities,submissionDuplex}=mod.exports;
+ const settings=normalizedSettings({...base,duplex:'auto'});
+ assert.equal(canPrintWithoutCapabilities(settings),true);
+ assert.equal(submissionDuplex(settings.duplex,false,false),'manualAuto');
+ assert.equal(submissionDuplex('simplex',false,false),'simplex');
+ for(const change of [{paper:'Custom'},{tray:1},{driverDpi:{x:600,y:600}},{scaling:'printable'},{photoBatch:true}]){
+  assert.equal(canPrintWithoutCapabilities({...settings,...change}),false);
+ }
 });
 
 const photoDoc=id=>({id,mime:'image/jpeg',pages:[{widthMm:100,heightMm:150,blank:false,ink:'colour',coverage:1}]});
