@@ -205,10 +205,19 @@ async function checkWorkflow(){
   if(process.argv.includes('--photo-copier')){
    await page.evaluate(()=>window.navigate('WhatsApp'));
    await selectCopierInPhotoPreview();
+   await page.select('.photo-quick-print-settings select[aria-label="Photos per A4 side"]','auto');
+   await page.select('.photo-quick-print-settings label:nth-child(2) select','auto');
+   await click('Flip to back','.photo-review-panel');
+   await page.waitForFunction(()=>{
+    const preview=document.querySelector('.photo-review-panel .preview');
+    return preview?.innerText.includes('Sheet 1 / 1 (Back)')&&!preview.innerText.includes('Rendering final sheet')&&!preview.innerText.includes('Blank side');
+   });
    await click('Print Now','.photo-review-panel');
    await page.waitForFunction(()=>window.attempts.some(print=>print.photoBatch&&print.printer==='Samsung SCX-6545X Series PS'));
    const request=await page.evaluate(()=>window.attempts.at(-1));
    assert.equal(request.paper,'A4');
+   assert.equal(request.duplex,'auto');
+   assert.equal(request.photoGrid.capacity,1);
    assert.deepEqual(request.printable,{left:5,right:5,top:5,bottom:5});
    console.log('Photo Print Now submits A4 to a copier with unavailable driver capabilities.');
    return;

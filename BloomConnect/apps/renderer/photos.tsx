@@ -15,6 +15,7 @@ import {useWorkspace} from './state';
 import {DocumentPreview,DocumentThumbnail,ImposedPreview,inspectDocument} from './pdf';
 import {cellBox,constrainPhotoFrame,contentBox,photoPlacementGeometry,planPhotos,reorderPhotoFrames,tightPhotoFrame,type DocumentInfo} from '../../packages/printing/plan';
 import {effectiveDpi} from '../../packages/printing/image-processing';
+import {isManualDuplex} from '../../packages/printing/duplex';
 import {normalizedSettings,type PrintSettingsInput} from '../../packages/printing/settings';
 import {PhotoCropEditor,type PhotoCrop} from './photo-crop-editor';
 const sizes:Record<string,[number,number]>={'Passport (35 × 45 mm)':[35,45],'ID (25 × 35 mm)':[25,35],'1 × 1 inch':[25.4,25.4],'2 × 2 inch':[50.8,50.8],'3 × 4 inch':[76.2,101.6],'4 × 6 inch':[101.6,152.4],'5 × 7 inch':[127,177.8],'6 × 8 inch':[152.4,203.2],'8 × 10 inch':[203.2,254],A6:[105,148],A5:[148,210],A4:[210,297],A3:[297,420]};
@@ -145,9 +146,10 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
  const customUnitFactor=unit==='in'?25.4:unit==='cm'?10:1;
  const commonPhotoSize=selected.length?Object.keys(sizes).find(preset=>selected.every(id=>photoItems[id].widthMm===sizes[preset][0]&&photoItems[id].heightMm===sizes[preset][1]))??(size==='Custom'?'Custom':'mixed'):size;
  const requestedPrints=Object.values(photoItems).reduce((sum,item)=>sum+item.quantity,0);
+ const automaticPhotosPerSide=Math.min(automaticPhotoLimit,Math.max(1,Math.ceil(requestedPrints/(twoSided?2:1))));
  const grid=autoFit||customGrid;
  const {rows,columns,capacity:gridCapacity}=autoFit
-  ?gridForPhotoCount(Math.min(automaticPhotoLimit,Math.max(1,requestedPrints)),landscape)
+  ?gridForPhotoCount(automaticPhotosPerSide,landscape)
   :{rows:customRows,columns:customColumns,capacity:customCapacity};
  const adjustments={charge:Math.round(charge*100),discount:Math.round(discount*100)};
  const monochromePrinter=capabilities?.colour===false;
@@ -623,6 +625,11 @@ export function PhotoStudio({onBack}:{onBack:()=>void}){
    {printerControl}
    {sidesControl}
   </fieldset>
+  {twoSided&&plan&&plan.photoCount>1&&!plan.sides.some(side=>side.back&&side.placements.length>0)&&
+   <small role="status">All photos fit on the front. Choose Auto or fewer photos per side to use the back.</small>}
+  {twoSided&&plan?.sides.some(side=>side.back&&side.placements.length>0)&&
+   !exportPrinter&&!virtualPrinter&&(isManualDuplex(duplex)||capabilities?.duplex===false||!!capabilityError&&driverFallback)&&
+   <small role="status">BloomConnect will ask you to reload the paper before printing the back sides.</small>}
   {printButton}
   <fieldset className="form-grid photo-quick-print-settings" disabled={busy}>
    <label>Photos per A4 side<select aria-label="Photos per A4 side" value={paper==='A4'&&autoFit?'auto':paper==='A4'&&grid?gridCapacity??rows*columns:''} onChange={e=>e.target.value==='auto'?useAutomaticFit():setA4Grid(Number(e.target.value))}>
